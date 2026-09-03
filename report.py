@@ -1,8 +1,9 @@
 import argparse
 import sqlite3
 import sys
-from datetime import date
 from pathlib import Path
+
+import clock
 
 DB_PATH = Path(__file__).parent / "wsb_comments.db"
 
@@ -15,9 +16,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--date",
-        default=date.today().isoformat(),
+        default=clock.market_today().isoformat(),
         metavar="YYYY-MM-DD",
-        help="Which day's thread to report on (default: today).",
+        help="Which day's thread to report on (default: today, US Eastern).",
     )
     args = parser.parse_args()
 

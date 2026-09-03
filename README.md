@@ -54,6 +54,14 @@ python mydigger.py
 
 No credentials or environment variables needed.
 
+## Which calendar day?
+
+WSB titles each thread "Daily Discussion Thread for &lt;US date&gt;". All three
+scripts resolve "today" in US Eastern time (`clock.py`), so a server running on
+UTC and a laptop on local time always agree on which thread is "today's" — no
+`TZ=` prefix needed on manual runs. This is why `requirements.txt` includes
+`tzdata` (Linux has the tz database system-wide; Windows does not).
+
 ## Running on a schedule (e.g. Hetzner)
 
 Every 10 minutes comfortably covers WSB's typical comment volume on the
@@ -61,7 +69,7 @@ Daily Discussion thread, with margin for busier days (the 100-comment page
 size covers roughly 1.5-2+ hours at typical rates). Add to crontab:
 
 ```cron
-*/10 * * * * cd /path/to/mydiggerapp && /path/to/venv/bin/python mydigger.py >> digger.log 2>&1
+*/10 * * * * cd $HOME/redditreader && $HOME/redditreader/.venv/bin/python mydigger.py >> $HOME/redditreader/digger.log 2>&1
 ```
 
 ## Data
@@ -96,3 +104,27 @@ Run `python report.py` to print today's most-mentioned symbols, or
 python report.py
 python report.py --date 2026-09-02
 ```
+
+## Trends over time
+
+`python trend.py` compares symbols across the last several days. For each one
+it shows total mentions in the window, how many were `$`-cashtags (the reliable
+kind), the day it first appeared, a per-day mention sparkline, mentions in the
+last few hours, and flags:
+
+- **NEW** — first seen within the last 2 days.
+- **HOT** — today's *share of voice* (mentions per comment) is at least twice
+  the prior days' average. Share of voice is used instead of raw counts because
+  backfilled days (~370 comments) and live days (thousands) aren't otherwise
+  comparable.
+- **$** — has at least one cashtag mention, so it's more likely a real ticker
+  than an English-word collision.
+
+```bash
+python trend.py                 # 7-day window
+python trend.py --days 14 --min 3
+python trend.py --recent-hours 2
+```
+
+Momentum flags only get meaningful once you have a few full *live* days in the
+database — a week of backfill alone isn't enough of a baseline.

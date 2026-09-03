@@ -10,6 +10,7 @@ from pathlib import Path
 
 import requests
 
+import clock
 import tickers
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -106,7 +107,7 @@ def get_cached_thread_id(conn: sqlite3.Connection, today_str: str) -> str | None
 
 def find_daily_discussion_id(subreddit: str) -> tuple[str, str] | None:
     """Search the subreddit's public RSS feed for today's Daily Discussion thread."""
-    today = date.today()
+    today = clock.market_today()
     month_name = today.strftime("%B")
     month_day = f"{month_name} {today.day}"
     month_day_padded = f"{month_name} {today.day:02d}"
@@ -190,7 +191,8 @@ def find_recent_daily_threads(subreddit: str, days_back: int) -> list[tuple[str,
     )
     root = parse_atom(get_with_retry(url))
 
-    cutoff = date.today() - timedelta(days=days_back)
+    today = clock.market_today()
+    cutoff = today - timedelta(days=days_back)
     results: list[tuple[str, str, str]] = []
     for entry in root.findall("atom:entry", ATOM_NS):
         title = entry.findtext("atom:title", default="", namespaces=ATOM_NS)
@@ -199,7 +201,7 @@ def find_recent_daily_threads(subreddit: str, days_back: int) -> list[tuple[str,
             continue
 
         thread_date = parse_daily_thread_date(title)
-        if thread_date is None or not (cutoff <= thread_date <= date.today()):
+        if thread_date is None or not (cutoff <= thread_date <= today):
             continue
 
         results.append((thread_date.isoformat(), entry_id.removeprefix("t3_"), title))
@@ -234,7 +236,7 @@ def extract_pending_mentions(conn: sqlite3.Connection, known_stock_symbols: set[
 
 def run_live(conn: sqlite3.Connection) -> None:
     """One incremental pass over today's Daily Discussion thread (the scheduled path)."""
-    today_str = date.today().isoformat()
+    today_str = clock.market_today().isoformat()
 
     thread_id = get_cached_thread_id(conn, today_str)
     if thread_id is None:

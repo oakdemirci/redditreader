@@ -1,1 +1,2 @@
 requests
+tzdata  # ships the IANA tz database for zoneinfo (Linux has it system-wide; Windows doesn't)

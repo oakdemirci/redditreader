@@ -5,3 +5,10 @@ __pycache__/
 *.db
 digger.log
 tickers_cache.txt
+
+# SSH keys must never live in the repo — keep them in ~/.ssh
+id_deploy*
+id_ed25519*
+id_rsa*
+*.pem
+*.key
