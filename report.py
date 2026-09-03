@@ -1,3 +1,4 @@
+import argparse
 import sqlite3
 import sys
 from datetime import date
@@ -9,14 +10,25 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Print the most-mentioned tickers/coins for a stored Daily Discussion thread."
+    )
+    parser.add_argument(
+        "--date",
+        default=date.today().isoformat(),
+        metavar="YYYY-MM-DD",
+        help="Which day's thread to report on (default: today).",
+    )
+    args = parser.parse_args()
+
     conn = sqlite3.connect(DB_PATH)
-    today_str = date.today().isoformat()
+    today_str = args.date
 
     thread = conn.execute(
         "SELECT thread_id, title FROM daily_threads WHERE date = ?", (today_str,)
     ).fetchone()
     if not thread:
-        print("No thread recorded for today yet.")
+        print(f"No thread recorded for {today_str}.")
         return
 
     thread_id, title = thread

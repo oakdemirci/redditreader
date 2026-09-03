@@ -20,6 +20,24 @@ run can't capture a whole day of comments on a fast-moving thread — it has
 to be run repeatedly throughout the day so each run's "delta" builds up the
 full picture in the database. Run it on a schedule (see below).
 
+## Backfilling recent days
+
+```bash
+python mydigger.py --backfill        # last 7 days
+python mydigger.py --backfill 14     # last 14 days
+```
+
+Backfill finds recent Daily Discussion threads via the subreddit's public
+search feed (`/r/<subreddit>/search.rss`) and pulls each one across four sort
+orders (`new`, `old`, `top`, `controversial`), deduplicated by comment ID.
+
+Coverage of past days is **partial by design**: once a thread stops taking
+comments, RSS exposes only ~100 per sort order, so a busy day yields roughly
+250–400 of its several thousand comments (the head, the tail, and the
+most-voted). Only days going forward — collected live throughout the day —
+get full coverage. Backfill paces itself (~7s between requests) to stay under
+Reddit's anonymous rate limit, so a 7-day run takes a few minutes.
+
 ## What it does NOT do
 
 - No posting, commenting, voting, messaging, or moderation actions.
@@ -71,8 +89,10 @@ collides with some real ticker symbols. Treat cashtag mentions as reliable
 and bareword mentions as "possible," and extend `STOPWORDS` if you spot new
 false positives.
 
-Run `python report.py` to print today's most-mentioned symbols:
+Run `python report.py` to print today's most-mentioned symbols, or
+`--date` for a specific stored day:
 
 ```bash
 python report.py
+python report.py --date 2026-09-02
 ```

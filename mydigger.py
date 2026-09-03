@@ -1,10 +1,11 @@
+import argparse
 import html
 import re
 import sqlite3
 import sys
 import time
 import xml.etree.ElementTree as ET
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -19,6 +20,16 @@ USER_AGENT = "windows:com.oakdemirci.redditdig:v1.0 (by u/WhiteBlackSmith_2021)"
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 FETCH_LIMIT = 100  # max comments Reddit's RSS returns per request
 DB_PATH = Path(__file__).parent / "wsb_comments.db"
+
+DAILY_TITLE_PREFIX = "Daily Discussion Thread for"
+DAILY_DATE_RE = re.compile(
+    r"Daily Discussion Thread for\s+([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})"
+)
+DEFAULT_BACKFILL_DAYS = 7
+# A finished thread never gets new comments, so one pass of `sort=new` only sees
+# its last ~100. Pulling several sort orders widens the (still partial) snapshot:
+# `new`/`old` grab the tail/head, `top`/`controversial` grab the most-voted.
+BACKFILL_SORTS = ("new", "old", "top", "controversial")
 
 session = requests.Session()
 session.headers.update({"User-Agent": USER_AGENT})
@@ -117,9 +128,15 @@ def find_daily_discussion_id(subreddit: str) -> tuple[str, str] | None:
     return None
 
 
-def fetch_new_comments(conn: sqlite3.Connection, subreddit: str, thread_id: str) -> int:
-    """Fetch the newest comments and insert any not already stored. Returns count of new rows."""
-    url = f"https://www.reddit.com/r/{subreddit}/comments/{thread_id}/.rss?limit={FETCH_LIMIT}&sort=new"
+def fetch_comments(
+    conn: sqlite3.Connection, subreddit: str, thread_id: str, sort: str = "new"
+) -> int:
+    """Fetch one page of comments in the given sort order, inserting any not
+    already stored. Returns the count of new rows."""
+    url = (
+        f"https://www.reddit.com/r/{subreddit}/comments/{thread_id}/.rss"
+        f"?limit={FETCH_LIMIT}&sort={sort}"
+    )
     response = get_with_retry(url)
     root = parse_atom(response)
 
@@ -148,7 +165,49 @@ def fetch_new_comments(conn: sqlite3.Connection, subreddit: str, thread_id: str)
     return new_count
 
 
-def backfill_mentions(conn: sqlite3.Connection, known_stock_symbols: set[str]) -> int:
+def parse_daily_thread_date(title: str) -> date | None:
+    """Pull the calendar date out of a 'Daily Discussion Thread for September 3, 2026' title."""
+    match = DAILY_DATE_RE.search(title)
+    if not match:
+        return None
+
+    month_name, day, year = match.groups()
+    try:
+        return datetime.strptime(f"{month_name} {int(day)} {year}", "%B %d %Y").date()
+    except ValueError:
+        return None
+
+
+def find_recent_daily_threads(subreddit: str, days_back: int) -> list[tuple[str, str, str]]:
+    """Search the subreddit's public RSS for recent Daily Discussion threads.
+
+    Returns (date_iso, thread_id, title) tuples, newest first, restricted to
+    threads dated within `days_back` days of today.
+    """
+    url = (
+        f"https://www.reddit.com/r/{subreddit}/search.rss"
+        f"?q=%22Daily+Discussion+Thread%22&restrict_sr=1&sort=new&limit=100"
+    )
+    root = parse_atom(get_with_retry(url))
+
+    cutoff = date.today() - timedelta(days=days_back)
+    results: list[tuple[str, str, str]] = []
+    for entry in root.findall("atom:entry", ATOM_NS):
+        title = entry.findtext("atom:title", default="", namespaces=ATOM_NS)
+        entry_id = entry.findtext("atom:id", default="", namespaces=ATOM_NS)
+        if not entry_id.startswith("t3_") or not title.startswith(DAILY_TITLE_PREFIX):
+            continue
+
+        thread_date = parse_daily_thread_date(title)
+        if thread_date is None or not (cutoff <= thread_date <= date.today()):
+            continue
+
+        results.append((thread_date.isoformat(), entry_id.removeprefix("t3_"), title))
+
+    return results
+
+
+def extract_pending_mentions(conn: sqlite3.Connection, known_stock_symbols: set[str]) -> int:
     """Extract ticker/coin mentions for any stored comment not yet processed."""
     rows = conn.execute(
         """
@@ -173,10 +232,9 @@ def backfill_mentions(conn: sqlite3.Connection, known_stock_symbols: set[str]) -
     return len(rows)
 
 
-def main() -> None:
+def run_live(conn: sqlite3.Connection) -> None:
+    """One incremental pass over today's Daily Discussion thread (the scheduled path)."""
     today_str = date.today().isoformat()
-    conn = sqlite3.connect(DB_PATH)
-    init_db(conn)
 
     thread_id = get_cached_thread_id(conn, today_str)
     if thread_id is None:
@@ -194,15 +252,78 @@ def main() -> None:
         print(f"Located Thread: {title}\n")
         time.sleep(1)  # be polite between requests
 
-    new_count = fetch_new_comments(conn, TARGET_SUBREDDIT, thread_id)
+    new_count = fetch_comments(conn, TARGET_SUBREDDIT, thread_id, sort="new")
     total_count = conn.execute(
         "SELECT COUNT(*) FROM comments WHERE thread_id = ?", (thread_id,)
     ).fetchone()[0]
+    print(f"Added {new_count} new comment(s). Total stored for today: {total_count}.")
+
+
+def run_backfill(conn: sqlite3.Connection, days_back: int) -> None:
+    """Grab whatever's still reachable from the last `days_back` days of threads.
+
+    Coverage is necessarily partial: for a thread that's no longer taking
+    comments, RSS only exposes ~100 per sort order, so busy days lose the middle.
+    """
+    threads = find_recent_daily_threads(TARGET_SUBREDDIT, days_back)
+    if not threads:
+        print("No recent Daily Discussion threads found via search.")
+        return
+
+    print(f"Found {len(threads)} Daily Discussion thread(s) within {days_back} days.\n")
+    for date_iso, thread_id, title in threads:
+        conn.execute(
+            "INSERT OR REPLACE INTO daily_threads (date, thread_id, title) VALUES (?, ?, ?)",
+            (date_iso, thread_id, title),
+        )
+        conn.commit()
+
+        new_count = 0
+        for sort in BACKFILL_SORTS:
+            # Anonymous RSS tolerates ~1 request per 5s; exceed it and Reddit
+            # stretches the cooldown to ~50s. Pacing here keeps the whole run
+            # to a few minutes. get_with_retry still covers any 429 that slips.
+            time.sleep(7)
+            new_count += fetch_comments(conn, TARGET_SUBREDDIT, thread_id, sort=sort)
+
+        stored = conn.execute(
+            "SELECT COUNT(*) FROM comments WHERE thread_id = ?", (thread_id,)
+        ).fetchone()[0]
+        print(f"  {date_iso}  +{new_count:>4} new, {stored:>4} stored  {title}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Incrementally archive r/wallstreetbets' Daily Discussion comments."
+    )
+    parser.add_argument(
+        "--backfill",
+        nargs="?",
+        type=int,
+        const=DEFAULT_BACKFILL_DAYS,
+        default=None,
+        metavar="DAYS",
+        help=(
+            f"Instead of the live run, backfill recent Daily Discussion threads "
+            f"(default {DEFAULT_BACKFILL_DAYS} days). Coverage is partial — RSS "
+            "returns at most ~100 comments per sort order for a finished thread."
+        ),
+    )
+    args = parser.parse_args()
+
+    conn = sqlite3.connect(DB_PATH)
+    init_db(conn)
+
+    if args.backfill is not None:
+        run_backfill(conn, args.backfill)
+    else:
+        run_live(conn)
 
     known_stock_symbols = tickers.load_known_stock_symbols()
-    backfill_mentions(conn, known_stock_symbols)
+    processed = extract_pending_mentions(conn, known_stock_symbols)
+    if processed:
+        print(f"Scanned {processed} new comment(s) for ticker/coin mentions.")
 
-    print(f"Added {new_count} new comment(s). Total stored for today: {total_count}.")
     conn.close()
 
 
