@@ -1,16 +1,18 @@
 # mydiggerapp
 
 A small personal script that fetches r/wallstreetbets' pinned "Daily Discussion"
-thread for the current day via Reddit's official OAuth2 API and prints the top
-15 top-level comments (score, author, body preview) for personal reading.
+thread for the current day via Reddit's public RSS feeds and prints the top
+comments (author, body preview) for personal reading.
 
 ## What it does
 
-- Authenticates read-only via OAuth2 `client_credentials` (app-only auth, no
-  Reddit user login/password required).
-- Looks up r/wallstreetbets' hot/stickied posts to find today's Daily
-  Discussion thread.
+- Reads Reddit's public, unauthenticated Atom/RSS feeds (`/r/<subreddit>/.rss`
+  and `/r/<subreddit>/comments/<id>/.rss`) — the same feature used by any RSS
+  reader, no login or API app required.
+- Looks up r/wallstreetbets' feed to find today's Daily Discussion thread.
 - Prints the top-level comments from that thread.
+- Automatically waits and retries if Reddit's anonymous rate limit
+  (roughly one request per minute per IP) is hit.
 
 ## What it does NOT do
 
@@ -21,13 +23,14 @@ thread for the current day via Reddit's official OAuth2 API and prints the top
 
 ## Setup
 
-1. Create a read-only "script" app at https://www.reddit.com/prefs/apps
-2. Set the following environment variables:
-   - `REDDIT_CLIENT_ID`
-   - `REDDIT_CLIENT_SECRET`
-3. Install dependencies and run:
-
 ```bash
 pip install -r requirements.txt
 python mydigger.py
 ```
+
+No credentials or environment variables needed.
+
+## Note on comment scores
+
+Reddit's RSS feeds don't expose comment vote scores, so comments are listed
+in the order Reddit's feed returns them rather than sorted by score.
