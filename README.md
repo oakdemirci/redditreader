@@ -1,18 +1,24 @@
 # mydiggerapp
 
-A small personal script that fetches r/wallstreetbets' pinned "Daily Discussion"
-thread for the current day via Reddit's public RSS feeds and prints the top
-comments (author, body preview) for personal reading.
+A personal script that incrementally archives r/wallstreetbets' pinned "Daily
+Discussion" thread over the course of a day, using Reddit's public RSS feeds.
 
-## What it does
+## How it works
 
 - Reads Reddit's public, unauthenticated Atom/RSS feeds (`/r/<subreddit>/.rss`
   and `/r/<subreddit>/comments/<id>/.rss`) — the same feature used by any RSS
   reader, no login or API app required.
-- Looks up r/wallstreetbets' feed to find today's Daily Discussion thread.
-- Prints the top-level comments from that thread.
+- On first run of the day, looks up today's Daily Discussion thread and
+  caches its ID in `wsb_comments.db` (SQLite) so later runs skip that lookup.
+- Each run fetches the newest 100 comments (`sort=new`) and inserts any not
+  already stored, deduplicated by comment ID.
 - Automatically waits and retries if Reddit's anonymous rate limit
   (roughly one request per minute per IP) is hit.
+
+Because Reddit's RSS feeds only ever return one page of results, a single
+run can't capture a whole day of comments on a fast-moving thread — it has
+to be run repeatedly throughout the day so each run's "delta" builds up the
+full picture in the database. Run it on a schedule (see below).
 
 ## What it does NOT do
 
@@ -30,7 +36,18 @@ python mydigger.py
 
 No credentials or environment variables needed.
 
-## Note on comment scores
+## Running on a schedule (e.g. Hetzner)
 
-Reddit's RSS feeds don't expose comment vote scores, so comments are listed
-in the order Reddit's feed returns them rather than sorted by score.
+Every 10 minutes comfortably covers WSB's typical comment volume on the
+Daily Discussion thread, with margin for busier days (the 100-comment page
+size covers roughly 1.5-2+ hours at typical rates). Add to crontab:
+
+```cron
+*/10 * * * * cd /path/to/mydiggerapp && /path/to/venv/bin/python mydigger.py >> digger.log 2>&1
+```
+
+## Data
+
+Comments accumulate in `wsb_comments.db` (SQLite), table `comments`
+(`id`, `thread_id`, `author`, `body`, `posted_at`, `fetched_at`). Query it
+directly with any SQLite client for analysis.
