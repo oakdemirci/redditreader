@@ -51,3 +51,28 @@ size covers roughly 1.5-2+ hours at typical rates). Add to crontab:
 Comments accumulate in `wsb_comments.db` (SQLite), table `comments`
 (`id`, `thread_id`, `author`, `body`, `posted_at`, `fetched_at`). Query it
 directly with any SQLite client for analysis.
+
+Note: Reddit's RSS feeds don't expose comment vote/score data at all, so
+there's no way to capture or backfill upvotes/downvotes with this approach.
+
+## Ticker/coin mention extraction
+
+Every stored comment is scanned for referenced stock tickers and major
+cryptocurrencies (`tickers.py`), with two confidence levels:
+
+- **cashtag** — `$TICKER` mentions (WSB's own convention). High confidence.
+- **bareword** — plain all-caps words matched against the real NASDAQ/NYSE
+  symbol list (auto-downloaded and cached weekly) or a curated list of major
+  crypto symbols, after filtering out common WSB slang and English words
+  that coincide with real ticker symbols (`STOPWORDS` in `tickers.py`).
+
+Bareword matching can never be perfectly precise — plain English inevitably
+collides with some real ticker symbols. Treat cashtag mentions as reliable
+and bareword mentions as "possible," and extend `STOPWORDS` if you spot new
+false positives.
+
+Run `python report.py` to print today's most-mentioned symbols:
+
+```bash
+python report.py
+```

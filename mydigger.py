@@ -9,6 +9,8 @@ from pathlib import Path
 
 import requests
 
+import tickers
+
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # 1. Configuration
@@ -69,6 +71,17 @@ def init_db(conn: sqlite3.Connection) -> None:
             body TEXT NOT NULL,
             posted_at TEXT NOT NULL,
             fetched_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mentions (
+            comment_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            PRIMARY KEY (comment_id, symbol),
+            FOREIGN KEY (comment_id) REFERENCES comments(id)
         )
         """
     )
@@ -135,6 +148,31 @@ def fetch_new_comments(conn: sqlite3.Connection, subreddit: str, thread_id: str)
     return new_count
 
 
+def backfill_mentions(conn: sqlite3.Connection, known_stock_symbols: set[str]) -> int:
+    """Extract ticker/coin mentions for any stored comment not yet processed."""
+    rows = conn.execute(
+        """
+        SELECT id, body FROM comments
+        WHERE id NOT IN (SELECT DISTINCT comment_id FROM mentions)
+        """
+    ).fetchall()
+
+    for comment_id, body in rows:
+        found = tickers.extract_symbols(body, known_stock_symbols)
+        if not found:
+            # mark as processed with no mentions found, so it isn't rescanned every run
+            found = [("__none__", "n/a")]
+
+        for symbol, confidence in found:
+            conn.execute(
+                "INSERT OR IGNORE INTO mentions (comment_id, symbol, confidence) VALUES (?, ?, ?)",
+                (comment_id, symbol, confidence),
+            )
+
+    conn.commit()
+    return len(rows)
+
+
 def main() -> None:
     today_str = date.today().isoformat()
     conn = sqlite3.connect(DB_PATH)
@@ -160,6 +198,9 @@ def main() -> None:
     total_count = conn.execute(
         "SELECT COUNT(*) FROM comments WHERE thread_id = ?", (thread_id,)
     ).fetchone()[0]
+
+    known_stock_symbols = tickers.load_known_stock_symbols()
+    backfill_mentions(conn, known_stock_symbols)
 
     print(f"Added {new_count} new comment(s). Total stored for today: {total_count}.")
     conn.close()
