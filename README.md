@@ -20,6 +20,23 @@ run can't capture a whole day of comments on a fast-moving thread — it has
 to be run repeatedly throughout the day so each run's "delta" builds up the
 full picture in the database. Run it on a schedule (see below).
 
+### Comment gaps
+
+RSS caps each request at the newest ~100 comments and offers no way to page
+further back. If more than ~100 comments are posted between two runs (WSB's
+thread spikes hard at the open and around 08:30 ET economic prints), the ones
+in the middle are never on a page when the script looks — they're lost, not
+just delayed. A short poll interval is the defence. Each live run checks
+whether the thread outran the feed since last time and prints a
+`WARNING: comment gap ...` line (to `digger.log`) when it did:
+
+```bash
+grep WARNING ~/redditreader/digger.log
+```
+
+Frequent warnings mean the interval is still too long, or it's time to move
+the live fetch to the JSON endpoint (`.json?limit=500`).
+
 ## Backfilling recent days
 
 ```bash
@@ -64,13 +81,18 @@ UTC and a laptop on local time always agree on which thread is "today's" — no
 
 ## Running on a schedule (e.g. Hetzner)
 
-Every 10 minutes comfortably covers WSB's typical comment volume on the
-Daily Discussion thread, with margin for busier days (the 100-comment page
-size covers roughly 1.5-2+ hours at typical rates). Add to crontab:
+On an average day WSB's Daily Discussion runs ~10 comments/minute — right at
+the 100-per-page limit for a 10-minute interval, and well over it during
+open/news spikes. Poll every 3 minutes so a full page always overlaps the last
+run (one request per run; Reddit's anonymous limit tolerates far more). Add to
+crontab:
 
 ```cron
-*/10 * * * * cd $HOME/redditreader && $HOME/redditreader/.venv/bin/python mydigger.py >> $HOME/redditreader/digger.log 2>&1
+*/3 * * * * cd $HOME/redditreader && $HOME/redditreader/.venv/bin/python mydigger.py >> $HOME/redditreader/digger.log 2>&1
 ```
+
+Watch `digger.log` for `WARNING: comment gap` lines — those mean the thread
+still outran the feed and some comments were lost (see "Comment gaps" above).
 
 ## Data
 

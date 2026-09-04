@@ -130,10 +130,27 @@ def find_daily_discussion_id(subreddit: str) -> tuple[str, str] | None:
 
 
 def fetch_comments(
-    conn: sqlite3.Connection, subreddit: str, thread_id: str, sort: str = "new"
+    conn: sqlite3.Connection,
+    subreddit: str,
+    thread_id: str,
+    sort: str = "new",
+    detect_gap: bool = False,
 ) -> int:
     """Fetch one page of comments in the given sort order, inserting any not
-    already stored. Returns the count of new rows."""
+    already stored. Returns the count of new rows.
+
+    With `detect_gap` (the live `sort=new` path), warn if the thread outran the
+    feed since last run: RSS only exposes the newest ~100 comments with no way
+    to page back, so if every comment on a full page is newer than everything we
+    already have, the ones in between were posted and lost. The fix is a shorter
+    poll interval.
+    """
+    prior_latest = None
+    if detect_gap:
+        prior_latest = conn.execute(
+            "SELECT MAX(posted_at) FROM comments WHERE thread_id = ?", (thread_id,)
+        ).fetchone()[0]
+
     url = (
         f"https://www.reddit.com/r/{subreddit}/comments/{thread_id}/.rss"
         f"?limit={FETCH_LIMIT}&sort={sort}"
@@ -143,6 +160,8 @@ def fetch_comments(
 
     fetched_at = datetime.now(timezone.utc).isoformat()
     new_count = 0
+    page_size = 0
+    oldest_on_page = None
 
     for entry in root.findall("atom:entry", ATOM_NS):
         entry_id = entry.findtext("atom:id", default="", namespaces=ATOM_NS)
@@ -154,6 +173,10 @@ def fetch_comments(
         body = strip_html(raw_content)
         posted_at = entry.findtext("atom:updated", default="", namespaces=ATOM_NS)
 
+        page_size += 1
+        if posted_at and (oldest_on_page is None or posted_at < oldest_on_page):
+            oldest_on_page = posted_at
+
         cursor = conn.execute(
             "INSERT OR IGNORE INTO comments (id, thread_id, author, body, posted_at, fetched_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
@@ -163,6 +186,20 @@ def fetch_comments(
             new_count += 1
 
     conn.commit()
+
+    if (
+        detect_gap
+        and prior_latest is not None
+        and oldest_on_page is not None
+        and page_size >= FETCH_LIMIT          # a full page — the feed likely had more
+        and oldest_on_page > prior_latest     # ...and none of it overlaps what we stored
+    ):
+        print(
+            f"WARNING: comment gap — oldest on this page ({oldest_on_page}) is newer "
+            f"than the last stored ({prior_latest}); comments between them were missed. "
+            f"Poll more often."
+        )
+
     return new_count
 
 
@@ -254,7 +291,7 @@ def run_live(conn: sqlite3.Connection) -> None:
         print(f"Located Thread: {title}\n")
         time.sleep(1)  # be polite between requests
 
-    new_count = fetch_comments(conn, TARGET_SUBREDDIT, thread_id, sort="new")
+    new_count = fetch_comments(conn, TARGET_SUBREDDIT, thread_id, sort="new", detect_gap=True)
     total_count = conn.execute(
         "SELECT COUNT(*) FROM comments WHERE thread_id = ?", (thread_id,)
     ).fetchone()[0]
