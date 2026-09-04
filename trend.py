@@ -1,16 +1,19 @@
-"""Day-over-day ticker/coin trends from the archived WSB Daily Discussion comments.
+"""Day-over-day ticker/coin trends from the archived WSB megathread comments.
 
-For each symbol in the window this shows: total mentions, how many were $-cashtags
-(reliable) vs barewords (noisy), the day it first appeared, a per-day mention
-sparkline, mentions in the last few hours, and flags:
+Each day merges both threads collected for it — the Daily Discussion and the
+'What Are Your Moves Tomorrow' posted that evening. For each symbol in the
+window this shows: total mentions, how many were $-cashtags (reliable) vs
+barewords (noisy), the day it first appeared, a per-day mention sparkline,
+mentions in the last few hours, and flags:
 
   NEW   first seen within the last 2 days
   HOT   today's share-of-voice is >= 2x the prior days' average (momentum)
   $     at least one $-cashtag mention (higher confidence it's really a ticker)
 
-Backfilled days hold only a partial sample (~370 comments) while live days
-accumulate all day, so raw counts aren't comparable across them. The HOT flag
-compares *share of voice* (mentions per comment) instead, which is.
+Backfilled days hold only a partial sample (~370 comments, Daily Discussion
+only) while live days accumulate both threads all day, so raw counts aren't
+comparable across them. The HOT flag compares *share of voice* (mentions per
+comment) instead, which is.
 """
 
 import argparse
@@ -35,19 +38,24 @@ def window_days(days: int) -> list[str]:
     return [(today - timedelta(days=n)).isoformat() for n in range(days - 1, -1, -1)]
 
 
-def load_comment_counts(conn: sqlite3.Connection, start: str) -> dict[str, int]:
-    return dict(
-        conn.execute(
-            """
-            SELECT d.date, COUNT(c.id)
-            FROM daily_threads d
-            LEFT JOIN comments c ON c.thread_id = d.thread_id
-            WHERE d.date >= ?
-            GROUP BY d.date
-            """,
-            (start,),
-        ).fetchall()
-    )
+def load_comment_counts(
+    conn: sqlite3.Connection, start: str
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Returns (comments_per_day, thread_kinds_per_day) — both keyed by date,
+    with the two megathreads for a day merged."""
+    rows = conn.execute(
+        """
+        SELECT d.date, COUNT(c.id), GROUP_CONCAT(DISTINCT d.kind)
+        FROM daily_threads d
+        LEFT JOIN comments c ON c.thread_id = d.thread_id
+        WHERE d.date >= ?
+        GROUP BY d.date
+        """,
+        (start,),
+    ).fetchall()
+    counts = {day: count for day, count, _kinds in rows}
+    kinds = {day: "+".join(sorted((kinds or "").split(","))) for day, _c, kinds in rows}
+    return counts, kinds
 
 
 def load_mentions(
@@ -77,17 +85,17 @@ def load_mentions(
 
 
 def load_recent(conn: sqlite3.Connection, hours: float) -> dict[str, int]:
+    """Mentions in the last `hours`, across whichever thread they landed in."""
     return dict(
         conn.execute(
             """
             SELECT m.symbol, COUNT(DISTINCT m.comment_id)
             FROM mentions m
             JOIN comments c ON c.id = m.comment_id
-            JOIN daily_threads d ON d.thread_id = c.thread_id
-            WHERE d.date = ? AND c.posted_at >= ? AND m.symbol != '__none__'
+            WHERE c.posted_at >= ? AND m.symbol != '__none__'
             GROUP BY m.symbol
             """,
-            (clock.market_today().isoformat(), clock.utc_hours_ago(hours)),
+            (clock.utc_hours_ago(hours),),
         ).fetchall()
     )
 
@@ -110,21 +118,28 @@ def main() -> None:
     args = parser.parse_args()
 
     days = window_days(args.days)
-    today_str = days[-1]
 
     conn = sqlite3.connect(DB_PATH)
-    comment_counts = load_comment_counts(conn, days[0])
+    comment_counts, thread_kinds = load_comment_counts(conn, days[0])
     mentions_by_symbol, cashtag_counts = load_mentions(conn, days[0])
     recent = load_recent(conn, args.recent_hours)
     conn.close()
 
-    # Weekends have no Daily Discussion thread; only show days we actually stored.
+    # Weekends have no threads, and just after midnight ET the new day isn't
+    # collected yet — so "today" for scoring is the most recent day with data.
     shown_days = [d for d in days if d in comment_counts]
+    if not shown_days:
+        print("No thread data in this window yet.")
+        return
+    today_str = shown_days[-1]
 
     now_et = clock.market_now().strftime("%Y-%m-%d %H:%M ET")
-    print(f"WSB ticker trends — {args.days}-day window, as of {now_et}\n")
+    print(f"WSB ticker trends — {args.days}-day window, as of {now_et}")
+    if today_str != days[-1]:
+        print(f"(latest day with data: {today_str})")
+    print()
 
-    print("Coverage (comments archived per thread):")
+    print("Coverage (comments archived per day, both threads merged):")
     for day in shown_days:
         count = comment_counts[day]
         if day == today_str:
@@ -133,7 +148,7 @@ def main() -> None:
             tag = "partial backfill"
         else:
             tag = "full"
-        print(f"  {day}   {count:>5}   {tag}")
+        print(f"  {day}   {count:>5}   {thread_kinds.get(day, ''):<12}{tag}")
     print()
 
     scored = []

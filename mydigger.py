@@ -23,10 +23,100 @@ FETCH_LIMIT = 100  # max comments Reddit's RSS returns per request
 DB_PATH = Path(__file__).parent / "wsb_comments.db"
 
 DAILY_TITLE_PREFIX = "Daily Discussion Thread for"
-DAILY_DATE_RE = re.compile(
-    r"Daily Discussion Thread for\s+([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})"
-)
+
+MONTHS = {
+    "January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6,
+    "July": 7, "August": 8, "September": 9, "October": 10, "November": 11, "December": 12,
+}
+TITLE_DATE_RE = re.compile(r"\b([A-Z][a-z]+)\s+(\d{1,2}),?\s+(\d{4})\b")
+WEEKEND_RANGE_RE = re.compile(r"Weekend of\s+([A-Z][a-z]+)\s+(\d{1,2})")
+
+# WSB's weekly rhythm, all times US Eastern:
+#   Mon-Fri ~06:00   "Daily Discussion Thread for <D>"            -> the trading day
+#   Mon-Thu ~16:00   "What Are Your Moves Tomorrow, <D+1>"        -> evening + overnight
+#   Fri     ~16:00   "Weekend Discussion Thread ... Weekend of <Sat>-<Sun>"  -> Fri night..Sun
+#   Sun     ~16:00   "What Are Your Moves Tomorrow, <Mon>"        -> Sun evening + overnight
+# Every thread is collected and tagged with its `kind`; reports merge by default.
+# `resolve(title, today)` maps a title to the trading day the thread belongs to
+# (the 'moves' thread is titled for tomorrow; the weekend thread is filed under
+# its Saturday, and its title carries no year so `today` disambiguates). A thread
+# goes live at `belongs_date - posted_days_before`, `earliest_hour`:00 ET — used
+# to avoid front-page requests hunting for a thread that can't exist yet.
+KIND_DAILY = "daily"
+KIND_MOVES = "moves"
+KIND_WEEKEND = "weekend"
+
+
+def parse_title_date(title: str) -> date | None:
+    """Pull a '<Month> <D>, <YYYY>' date out of a title. Locale-independent."""
+    match = TITLE_DATE_RE.search(title)
+    if not match:
+        return None
+    month = MONTHS.get(match.group(1))
+    if month is None:
+        return None
+    try:
+        return date(int(match.group(3)), month, int(match.group(2)))
+    except ValueError:
+        return None
+
+
+def parse_weekend_saturday(title: str, today: date) -> date | None:
+    """The Saturday of a '...Weekend of <Month> <D1>-<D2>' title. No year in the
+    title, so pick the calendar year that lands the date near `today`."""
+    match = WEEKEND_RANGE_RE.search(title)
+    if not match:
+        return None
+    month = MONTHS.get(match.group(1))
+    if month is None:
+        return None
+    day = int(match.group(2))
+    for year in (today.year, today.year + 1, today.year - 1):
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            continue
+        if abs((candidate - today).days) <= 20:
+            return candidate
+    return None
+
+
+def _dated_resolver(day_offset: int):
+    def resolve(title: str, _today: date) -> date | None:
+        parsed = parse_title_date(title)
+        return None if parsed is None else parsed - timedelta(days=day_offset)
+
+    return resolve
+
+
+THREAD_SPECS: dict[str, dict] = {
+    KIND_DAILY: {
+        "prefix": DAILY_TITLE_PREFIX, "resolve": _dated_resolver(0),
+        "posted_days_before": 0, "earliest_hour": 5,
+    },
+    KIND_MOVES: {
+        "prefix": "What Are Your Moves Tomorrow", "resolve": _dated_resolver(1),
+        "posted_days_before": 0, "earliest_hour": 15,
+    },
+    KIND_WEEKEND: {
+        "prefix": "Weekend Discussion Thread", "resolve": parse_weekend_saturday,
+        "posted_days_before": 1, "earliest_hour": 15,  # posted Friday afternoon
+    },
+}
+
+
+def thread_is_live(kind: str, belongs_iso: str, now: datetime) -> bool:
+    """Has WSB plausibly posted this thread yet, given its kind and trading day?"""
+    spec = THREAD_SPECS[kind]
+    posted_day = date.fromisoformat(belongs_iso) - timedelta(days=spec["posted_days_before"])
+    if now.date() > posted_day:
+        return True
+    if now.date() == posted_day:
+        return now.hour >= spec["earliest_hour"]
+    return False
+
 DEFAULT_BACKFILL_DAYS = 7
+STALE_AFTER_HOURS = 12  # a thread with nothing new in this long is done; stop polling it
 # A finished thread never gets new comments, so one pass of `sort=new` only sees
 # its last ~100. Pulling several sort orders widens the (still partial) snapshot:
 # `new`/`old` grab the tail/head, `top`/`controversial` grab the most-voted.
@@ -68,9 +158,11 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS daily_threads (
-            date TEXT PRIMARY KEY,
+            date TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'daily',
             thread_id TEXT NOT NULL,
-            title TEXT NOT NULL
+            title TEXT NOT NULL,
+            PRIMARY KEY (date, kind)
         )
         """
     )
@@ -97,36 +189,85 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    _migrate_daily_threads(conn)
     conn.commit()
 
 
-def get_cached_thread_id(conn: sqlite3.Connection, today_str: str) -> str | None:
-    row = conn.execute("SELECT thread_id FROM daily_threads WHERE date = ?", (today_str,)).fetchone()
-    return row[0] if row else None
+def _migrate_daily_threads(conn: sqlite3.Connection) -> None:
+    """v1 keyed `daily_threads` on `date` alone (one thread per day). v2 adds a
+    `kind` column and keys on `(date, kind)` so the Daily Discussion and the
+    'What Are Your Moves Tomorrow' thread can both be stored for the same day."""
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(daily_threads)")]
+    if not columns or "kind" in columns:
+        return
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("ALTER TABLE daily_threads RENAME TO daily_threads_v1")
+        conn.execute(
+            """
+            CREATE TABLE daily_threads (
+                date TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'daily',
+                thread_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                PRIMARY KEY (date, kind)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO daily_threads (date, kind, thread_id, title) "
+            "SELECT date, 'daily', thread_id, title FROM daily_threads_v1"
+        )
+        conn.execute("DROP TABLE daily_threads_v1")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    print("Migrated daily_threads to the (date, kind) schema.")
 
 
-def find_daily_discussion_id(subreddit: str) -> tuple[str, str] | None:
-    """Search the subreddit's public RSS feed for today's Daily Discussion thread."""
+def find_megathreads(subreddit: str) -> list[tuple[str, str, str, str]]:
+    """Scan the subreddit's front-page RSS for Daily / Moves / Weekend megathreads.
+
+    Returns (date_iso, kind, thread_id, title) for every match within a few days
+    of today, where date_iso is the trading day the thread belongs to.
+    """
     today = clock.market_today()
-    month_name = today.strftime("%B")
-    month_day = f"{month_name} {today.day}"
-    month_day_padded = f"{month_name} {today.day:02d}"
+    root = parse_atom(get_with_retry(f"https://www.reddit.com/r/{subreddit}/.rss"))
 
-    response = get_with_retry(f"https://www.reddit.com/r/{subreddit}/.rss")
-
-    root = parse_atom(response)
+    found: list[tuple[str, str, str, str]] = []
     for entry in root.findall("atom:entry", ATOM_NS):
-        title = entry.findtext("atom:title", default="", namespaces=ATOM_NS)
         entry_id = entry.findtext("atom:id", default="", namespaces=ATOM_NS)
+        title = entry.findtext("atom:title", default="", namespaces=ATOM_NS)
+        if not entry_id.startswith("t3_"):
+            continue
 
-        if (
-            entry_id.startswith("t3_")
-            and "Daily Discussion" in title
-            and (month_day in title or month_day_padded in title)
-        ):
-            return entry_id.removeprefix("t3_"), title
+        for kind, spec in THREAD_SPECS.items():
+            if not title.startswith(spec["prefix"]):
+                continue
+            belongs = spec["resolve"](title, today)
+            if belongs is not None and abs((belongs - today).days) <= 3:
+                found.append(
+                    (belongs.isoformat(), kind, entry_id.removeprefix("t3_"), title)
+                )
 
-    return None
+    return found
+
+
+def expected_threads(today: date) -> set[tuple[str, str]]:
+    """(date_iso, kind) pairs WSB's schedule says should exist by now, so a run
+    knows whether it's worth hitting the network to look for anything new."""
+    weekday = today.weekday()  # Mon=0 .. Sun=6
+    expected: set[tuple[str, str]] = set()
+    if weekday <= 4:  # Mon-Fri: Daily Discussion
+        expected.add((today.isoformat(), KIND_DAILY))
+    if weekday <= 3 or weekday == 6:  # Mon-Thu, and Sun evening (for Monday)
+        expected.add((today.isoformat(), KIND_MOVES))
+    if weekday >= 4:  # Fri/Sat/Sun: this weekend's thread, filed under its Saturday
+        saturday = today + timedelta(days=5 - weekday)  # Fri +1, Sat 0, Sun -1
+        expected.add((saturday.isoformat(), KIND_WEEKEND))
+    return expected
 
 
 def fetch_comments(
@@ -203,24 +344,12 @@ def fetch_comments(
     return new_count
 
 
-def parse_daily_thread_date(title: str) -> date | None:
-    """Pull the calendar date out of a 'Daily Discussion Thread for September 3, 2026' title."""
-    match = DAILY_DATE_RE.search(title)
-    if not match:
-        return None
-
-    month_name, day, year = match.groups()
-    try:
-        return datetime.strptime(f"{month_name} {int(day)} {year}", "%B %d %Y").date()
-    except ValueError:
-        return None
-
-
 def find_recent_daily_threads(subreddit: str, days_back: int) -> list[tuple[str, str, str]]:
     """Search the subreddit's public RSS for recent Daily Discussion threads.
 
     Returns (date_iso, thread_id, title) tuples, newest first, restricted to
-    threads dated within `days_back` days of today.
+    threads dated within `days_back` days of today. Backfill covers the Daily
+    Discussion thread only — the 'moves' thread is collected going forward.
     """
     url = (
         f"https://www.reddit.com/r/{subreddit}/search.rss"
@@ -237,7 +366,7 @@ def find_recent_daily_threads(subreddit: str, days_back: int) -> list[tuple[str,
         if not entry_id.startswith("t3_") or not title.startswith(DAILY_TITLE_PREFIX):
             continue
 
-        thread_date = parse_daily_thread_date(title)
+        thread_date = parse_title_date(title)
         if thread_date is None or not (cutoff <= thread_date <= today):
             continue
 
@@ -271,31 +400,93 @@ def extract_pending_mentions(conn: sqlite3.Connection, known_stock_symbols: set[
     return len(rows)
 
 
-def run_live(conn: sqlite3.Connection) -> None:
-    """One incremental pass over today's Daily Discussion thread (the scheduled path)."""
-    today_str = clock.market_today().isoformat()
+def discover_threads(conn: sqlite3.Connection) -> None:
+    """Cache any megathread we don't have yet. Skips the network entirely unless
+    the schedule says something we're missing should exist by now — so no
+    front-page request at 3am hunting for a Daily Discussion that isn't posted."""
+    now = clock.market_now()
+    today = now.date()
+    horizon = (today - timedelta(days=3)).isoformat()
 
-    thread_id = get_cached_thread_id(conn, today_str)
-    if thread_id is None:
-        result = find_daily_discussion_id(TARGET_SUBREDDIT)
-        if not result:
-            print("Could not locate today's Daily Discussion thread.")
-            return
+    have = {
+        (row[0], row[1])
+        for row in conn.execute(
+            "SELECT date, kind FROM daily_threads WHERE date >= ?", (horizon,)
+        )
+    }
+    due = {
+        (thread_date, kind)
+        for thread_date, kind in expected_threads(today) - have
+        if thread_is_live(kind, thread_date, now)
+    }
+    if not due:
+        return
 
-        thread_id, title = result
+    try:
+        listed = find_megathreads(TARGET_SUBREDDIT)
+    except requests.RequestException as exc:
+        print(f"Thread discovery failed: {exc}")
+        return
+
+    for thread_date, kind, thread_id, title in listed:
+        if (thread_date, kind) in have:
+            continue
         conn.execute(
-            "INSERT OR REPLACE INTO daily_threads (date, thread_id, title) VALUES (?, ?, ?)",
-            (today_str, thread_id, title),
+            "INSERT OR REPLACE INTO daily_threads (date, kind, thread_id, title) "
+            "VALUES (?, ?, ?, ?)",
+            (thread_date, kind, thread_id, title),
         )
         conn.commit()
-        print(f"Located Thread: {title}\n")
-        time.sleep(1)  # be polite between requests
+        have.add((thread_date, kind))
+        print(f"Located {kind} thread ({thread_date}): {title}")
 
-    new_count = fetch_comments(conn, TARGET_SUBREDDIT, thread_id, sort="new", detect_gap=True)
-    total_count = conn.execute(
-        "SELECT COUNT(*) FROM comments WHERE thread_id = ?", (thread_id,)
-    ).fetchone()[0]
-    print(f"Added {new_count} new comment(s). Total stored for today: {total_count}.")
+
+def run_live(conn: sqlite3.Connection) -> None:
+    """One incremental pass (the scheduled path): discover today's threads, then
+    pull the newest comments from every recent thread that's still getting them
+    (or was just discovered). A thread quiet for STALE_AFTER_HOURS is dropped."""
+    today = clock.market_today()
+    discover_threads(conn)
+
+    candidates = conn.execute(
+        "SELECT date, kind, thread_id, title FROM daily_threads WHERE date >= ? "
+        "ORDER BY date, kind",
+        ((today - timedelta(days=3)).isoformat(),),
+    ).fetchall()
+    if not candidates:
+        print("No megathread located yet.")
+        return
+
+    ids = [row[2] for row in candidates]
+    last_comment = dict(
+        conn.execute(
+            f"SELECT thread_id, MAX(posted_at) FROM comments "
+            f"WHERE thread_id IN ({','.join('?' * len(ids))}) GROUP BY thread_id",
+            ids,
+        ).fetchall()
+    )
+    stale_before = clock.utc_hours_ago(STALE_AFTER_HOURS)
+    active = [
+        row for row in candidates
+        if last_comment.get(row[2]) is None or last_comment[row[2]] >= stale_before
+    ]
+
+    for index, (tdate, kind, thread_id, _title) in enumerate(active):
+        if index:
+            time.sleep(3)  # space requests out under Reddit's anon rate limit
+        try:
+            new_count = fetch_comments(
+                conn, TARGET_SUBREDDIT, thread_id, sort="new", detect_gap=True
+            )
+        except requests.RequestException as exc:
+            # One thread failing (usually a 429 that outlasted the retries)
+            # shouldn't cost us the others; the next run picks it up.
+            print(f"  [{tdate} {kind}] fetch failed: {exc}")
+            continue
+        stored = conn.execute(
+            "SELECT COUNT(*) FROM comments WHERE thread_id = ?", (thread_id,)
+        ).fetchone()[0]
+        print(f"  [{tdate} {kind}] +{new_count} new, {stored} stored")
 
 
 def run_backfill(conn: sqlite3.Connection, days_back: int) -> None:
@@ -312,8 +503,9 @@ def run_backfill(conn: sqlite3.Connection, days_back: int) -> None:
     print(f"Found {len(threads)} Daily Discussion thread(s) within {days_back} days.\n")
     for date_iso, thread_id, title in threads:
         conn.execute(
-            "INSERT OR REPLACE INTO daily_threads (date, thread_id, title) VALUES (?, ?, ?)",
-            (date_iso, thread_id, title),
+            "INSERT OR REPLACE INTO daily_threads (date, kind, thread_id, title) "
+            "VALUES (?, ?, ?, ?)",
+            (date_iso, KIND_DAILY, thread_id, title),
         )
         conn.commit()
 

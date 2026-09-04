@@ -1,17 +1,28 @@
 # mydiggerapp
 
-A personal script that incrementally archives r/wallstreetbets' pinned "Daily
-Discussion" thread over the course of a day, using Reddit's public RSS feeds.
+A personal script that incrementally archives r/wallstreetbets' rolling
+discussion megathreads over the course of a day, using Reddit's public RSS feeds.
 
 ## How it works
 
 - Reads Reddit's public, unauthenticated Atom/RSS feeds (`/r/<subreddit>/.rss`
   and `/r/<subreddit>/comments/<id>/.rss`) — the same feature used by any RSS
   reader, no login or API app required.
-- On first run of the day, looks up today's Daily Discussion thread and
-  caches its ID in `wsb_comments.db` (SQLite) so later runs skip that lookup.
-- Each run fetches the newest 100 comments (`sort=new`) and inserts any not
-  already stored, deduplicated by comment ID.
+- Tracks WSB's rolling megathreads, each tagged with its `kind` in the DB:
+  - `daily` — "Daily Discussion Thread for &lt;D&gt;" (Mon–Fri ~06:00 ET, active the trading day)
+  - `moves` — "What Are Your Moves Tomorrow, &lt;D+1&gt;" (Mon–Thu + Sun ~16:00 ET, evening + overnight)
+  - `weekend` — "Weekend Discussion Thread ... Weekend of &lt;Sat&gt;-&lt;Sun&gt;" (Fri ~16:00 ET, Fri night–Sun)
+
+  Each is filed under the trading day it belongs to: `moves` under the day it's
+  posted (its title names tomorrow), `weekend` under its Saturday. So a weekday
+  has `daily` + `moves`, Friday has `daily` + `weekend`, Saturday has `weekend`,
+  Sunday has `weekend` + `moves` (for Monday). Reports merge a day's threads.
+- Each run checks WSB's schedule and only hits the front-page feed if a thread
+  it's missing should exist by now; new thread IDs are cached in
+  `wsb_comments.db` (SQLite). It then fetches the newest 100 comments
+  (`sort=new`) from every recent thread still receiving comments (one that's
+  been quiet for 12h is dropped), and inserts any not already stored,
+  deduplicated by comment ID.
 - Automatically waits and retries if Reddit's anonymous rate limit
   (roughly one request per minute per IP) is hit.
 
@@ -44,9 +55,10 @@ python mydigger.py --backfill        # last 7 days
 python mydigger.py --backfill 14     # last 14 days
 ```
 
-Backfill finds recent Daily Discussion threads via the subreddit's public
+Backfill finds recent **Daily Discussion** threads via the subreddit's public
 search feed (`/r/<subreddit>/search.rss`) and pulls each one across four sort
-orders (`new`, `old`, `top`, `controversial`), deduplicated by comment ID.
+orders (`new`, `old`, `top`, `controversial`), deduplicated by comment ID. It
+does not backfill the `moves` thread — that one is only collected going forward.
 
 Coverage of past days is **partial by design**: once a thread stops taking
 comments, RSS exposes only ~100 per sort order, so a busy day yields roughly
@@ -73,32 +85,41 @@ No credentials or environment variables needed.
 
 ## Which calendar day?
 
-WSB titles each thread "Daily Discussion Thread for &lt;US date&gt;". All three
-scripts resolve "today" in US Eastern time (`clock.py`), so a server running on
-UTC and a laptop on local time always agree on which thread is "today's" — no
-`TZ=` prefix needed on manual runs. This is why `requirements.txt` includes
-`tzdata` (Linux has the tz database system-wide; Windows does not).
+WSB titles each thread with a US calendar date. All three scripts resolve
+"today" in US Eastern time (`clock.py`), so a server running on UTC and a laptop
+on local time always agree on which threads are "today's" — no `TZ=` prefix
+needed on manual runs. This is why `requirements.txt` includes `tzdata` (Linux
+has the tz database system-wide; Windows does not). The date parsing is
+locale-independent (an explicit month-name table, not `strptime("%B")`).
 
 ## Running on a schedule (e.g. Hetzner)
 
-On an average day WSB's Daily Discussion runs ~10 comments/minute — right at
-the 100-per-page limit for a 10-minute interval, and well over it during
-open/news spikes. Poll every 3 minutes so a full page always overlaps the last
-run (one request per run; Reddit's anonymous limit tolerates far more). Add to
-crontab:
+On an average day the megathreads run ~10 comments/minute each — right at the
+100-per-page limit for a 10-minute interval, and well over it during open/news
+spikes. Poll every 3 minutes so a full page always overlaps the last run. Each
+run makes ~2–4 requests (one per active thread, plus a discovery request while a
+thread it expects is still unposted); Reddit's anonymous limit tolerates that.
+`flock` keeps a slow run (rate-limit backoff) from overlapping the next:
 
 ```cron
-*/3 * * * * cd $HOME/redditreader && $HOME/redditreader/.venv/bin/python mydigger.py >> $HOME/redditreader/digger.log 2>&1
+*/3 * * * * /usr/bin/flock -n $HOME/redditreader/.lock $HOME/redditreader/.venv/bin/python $HOME/redditreader/mydigger.py >> $HOME/redditreader/digger.log 2>&1
 ```
 
-Watch `digger.log` for `WARNING: comment gap` lines — those mean the thread
-still outran the feed and some comments were lost (see "Comment gaps" above).
+Watch `digger.log` for `WARNING: comment gap` lines — those mean a thread still
+outran the feed and some comments were lost (see "Comment gaps" above).
 
 ## Data
 
-Comments accumulate in `wsb_comments.db` (SQLite), table `comments`
-(`id`, `thread_id`, `author`, `body`, `posted_at`, `fetched_at`). Query it
-directly with any SQLite client for analysis.
+`wsb_comments.db` (SQLite):
+
+- `daily_threads` (`date`, `kind`, `thread_id`, `title`) — one row per thread,
+  keyed `(date, kind)` where `kind` is `daily`, `moves`, or `weekend`.
+- `comments` (`id`, `thread_id`, `author`, `body`, `posted_at`, `fetched_at`) —
+  join to `daily_threads` on `thread_id` to get the day and source kind.
+- `mentions` (`comment_id`, `symbol`, `confidence`).
+
+Query it directly with any SQLite client. To split totals by source thread:
+`SELECT dt.kind, COUNT(*) FROM comments c JOIN daily_threads dt USING(thread_id) GROUP BY dt.kind`.
 
 Note: Reddit's RSS feeds don't expose comment vote/score data at all, so
 there's no way to capture or backfill upvotes/downvotes with this approach.

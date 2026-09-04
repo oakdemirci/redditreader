@@ -5,6 +5,7 @@ __pycache__/
 *.db
 digger.log
 tickers_cache.txt
+.lock
 
 # SSH keys must never live in the repo — keep them in ~/.ssh
 id_deploy*
