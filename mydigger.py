@@ -255,19 +255,24 @@ def find_megathreads(subreddit: str) -> list[tuple[str, str, str, str]]:
     return found
 
 
-def expected_threads(today: date) -> set[tuple[str, str]]:
-    """(date_iso, kind) pairs WSB's schedule says should exist by now, so a run
-    knows whether it's worth hitting the network to look for anything new."""
-    weekday = today.weekday()  # Mon=0 .. Sun=6
-    expected: set[tuple[str, str]] = set()
+def _expected_on(day: date) -> set[tuple[str, str]]:
+    weekday = day.weekday()  # Mon=0 .. Sun=6
+    out: set[tuple[str, str]] = set()
     if weekday <= 4:  # Mon-Fri: Daily Discussion
-        expected.add((today.isoformat(), KIND_DAILY))
+        out.add((day.isoformat(), KIND_DAILY))
     if weekday <= 3 or weekday == 6:  # Mon-Thu, and Sun evening (for Monday)
-        expected.add((today.isoformat(), KIND_MOVES))
+        out.add((day.isoformat(), KIND_MOVES))
     if weekday >= 4:  # Fri/Sat/Sun: this weekend's thread, filed under its Saturday
-        saturday = today + timedelta(days=5 - weekday)  # Fri +1, Sat 0, Sun -1
-        expected.add((saturday.isoformat(), KIND_WEEKEND))
-    return expected
+        saturday = day + timedelta(days=5 - weekday)  # Fri +1, Sat 0, Sun -1
+        out.add((saturday.isoformat(), KIND_WEEKEND))
+    return out
+
+
+def expected_threads(today: date) -> set[tuple[str, str]]:
+    """(date_iso, kind) pairs WSB's schedule says should currently exist and
+    still be active — today's threads plus the previous evening's, which runs
+    overnight (yesterday's 'moves' thread, active until this morning)."""
+    return _expected_on(today - timedelta(days=1)) | _expected_on(today)
 
 
 def fetch_comments(
@@ -448,19 +453,26 @@ def run_live(conn: sqlite3.Connection) -> None:
     today = clock.market_today()
     discover_threads(conn)
 
+    # Yesterday + today covers every thread that can still be active: today's,
+    # and the previous evening's 'moves' thread that runs overnight. (A thread
+    # dated in the future — a weekend thread found Friday — passes `>=` too.)
     candidates = conn.execute(
         "SELECT date, kind, thread_id, title FROM daily_threads WHERE date >= ? "
         "ORDER BY date, kind",
-        ((today - timedelta(days=3)).isoformat(),),
+        ((today - timedelta(days=1)).isoformat(),),
     ).fetchall()
     if not candidates:
         print("No megathread located yet.")
         return
 
+    # A thread is worth polling if we've never fetched a comment from it (just
+    # discovered) or we added one within STALE_AFTER_HOURS. `fetched_at` is set
+    # once at insert and never touched, so MAX(fetched_at) is "last time this
+    # thread produced a new comment" — unaffected by later edits to old ones.
     ids = [row[2] for row in candidates]
-    last_comment = dict(
+    last_new = dict(
         conn.execute(
-            f"SELECT thread_id, MAX(posted_at) FROM comments "
+            f"SELECT thread_id, MAX(fetched_at) FROM comments "
             f"WHERE thread_id IN ({','.join('?' * len(ids))}) GROUP BY thread_id",
             ids,
         ).fetchall()
@@ -468,7 +480,7 @@ def run_live(conn: sqlite3.Connection) -> None:
     stale_before = clock.utc_hours_ago(STALE_AFTER_HOURS)
     active = [
         row for row in candidates
-        if last_comment.get(row[2]) is None or last_comment[row[2]] >= stale_before
+        if last_new.get(row[2]) is None or last_new[row[2]] >= stale_before
     ]
 
     for index, (tdate, kind, thread_id, _title) in enumerate(active):
