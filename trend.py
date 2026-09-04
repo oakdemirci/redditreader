@@ -98,7 +98,7 @@ def share_of_voice(mentions: int, comments: int) -> float:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--days", type=int, default=7, help="Window size in days (default 7).")
+    parser.add_argument("--days", type=int, default=5, help="Window size in days (default 5).")
     parser.add_argument(
         "--min", type=int, default=2, dest="min_total",
         help="Hide symbols with fewer than this many mentions in the window (default 2).",
@@ -118,14 +118,14 @@ def main() -> None:
     recent = load_recent(conn, args.recent_hours)
     conn.close()
 
+    # Weekends have no Daily Discussion thread; only show days we actually stored.
+    shown_days = [d for d in days if d in comment_counts]
+
     now_et = clock.market_now().strftime("%Y-%m-%d %H:%M ET")
     print(f"WSB ticker trends — {args.days}-day window, as of {now_et}\n")
 
     print("Coverage (comments archived per thread):")
-    for day in days:
-        if day not in comment_counts:
-            print(f"  {day}   (no thread stored)")
-            continue
+    for day in shown_days:
         count = comment_counts[day]
         if day == today_str:
             tag = "live (in progress)"
@@ -174,8 +174,12 @@ def main() -> None:
 
     scored.sort(key=lambda r: (-r[0], -r[2], r[1]))
 
-    day_labels = "".join(f"{d[5:]:>6}" for d in days)  # MM-DD
-    header = f"{'SYMBOL':<8}{'TOTAL':>6}{'$':>4}  {'FIRST':<11}{day_labels}{'RECENT':>8}   FLAGS"
+    recent_label = f"{args.recent_hours:g}h"
+    day_labels = "".join(f"{d[5:]:>6}" for d in shown_days)  # MM-DD
+    header = (
+        f"{'SYM':<6}{'TOT':>4}{'$':>3}  {'1ST':<6}{day_labels}"
+        f"{recent_label:>6}  FLAGS"
+    )
     print(header)
     print("-" * len(header))
     if not scored:
@@ -183,17 +187,18 @@ def main() -> None:
         return
 
     for _, symbol, total, cashtags, first_seen, per_day, _today_n, recent_n, flags in scored:
-        spark = "".join(f"{per_day.get(d, 0) or '·':>6}" for d in days)
+        spark = "".join(f"{per_day.get(d, 0) or '·':>6}" for d in shown_days)
         print(
-            f"{symbol:<8}{total:>6}{cashtags:>4}  {first_seen:<11}{spark}"
-            f"{recent_n:>8}   {' '.join(flags)}"
+            f"{symbol:<6}{total:>4}{cashtags:>3}  {first_seen[5:]:<6}{spark}"
+            f"{recent_n:>6}  {' '.join(flags)}"
         )
 
     print(
-        "\nNotes: 'partial backfill' days hold ~370 comments vs thousands on a full day —\n"
-        "raw counts aren't comparable, so HOT uses share-of-voice (mentions per comment).\n"
-        "No '$' flag = bareword-only match; common words (TIME, BE, OR, UP...) collide with\n"
-        "real tickers, so treat those as low confidence."
+        f"\nColumns: TOT=mentions in window, $=how many were cashtags, 1ST=first-seen date,\n"
+        f"then mentions per day, then mentions in the last {recent_label}.\n"
+        "Notes: 'partial backfill' days hold ~370 comments vs thousands on a full day, so raw\n"
+        "counts aren't comparable — HOT uses share-of-voice (mentions per comment) instead.\n"
+        "No '$' = bareword-only match; words like TIME/BE/OR/UP collide with real tickers."
     )
 
 
