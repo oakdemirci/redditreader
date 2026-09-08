@@ -129,7 +129,7 @@ def main() -> None:
 
     days = window_days(args.days)
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     comment_counts, thread_kinds = load_comment_counts(conn, days[0])
     mentions_by_symbol, cashtag_counts = load_mentions(conn, days[0])
     recent = load_recent(conn, args.recent_hours)

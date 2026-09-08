@@ -59,7 +59,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
 
     if args.symbol:
         show_symbol_comments(conn, args.symbol.upper())

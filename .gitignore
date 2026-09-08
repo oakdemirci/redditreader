@@ -3,9 +3,11 @@ __pycache__/
 .venv/
 .env
 *.db
+*.db-wal
+*.db-shm
 digger.log
 tickers_cache.txt
-.lock
+*.lock
 
 # SSH keys must never live in the repo — keep them in ~/.ssh
 id_deploy*

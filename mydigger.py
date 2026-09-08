@@ -1,5 +1,6 @@
 import argparse
 import html
+import os
 import re
 import sqlite3
 import sys
@@ -21,6 +22,8 @@ USER_AGENT = "windows:com.oakdemirci.redditdig:v1.0 (by u/WhiteBlackSmith_2021)"
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 FETCH_LIMIT = 100  # max comments Reddit's RSS returns per request
 DB_PATH = Path(__file__).parent / "wsb_comments.db"
+LOCK_PATH = Path(__file__).parent / "mydigger.lock"
+LOCK_STALE_SECONDS = 20 * 60  # a normal run should never take this long; assume a crashed one
 
 DAILY_TITLE_PREFIX = "Daily Discussion Thread for"
 
@@ -155,6 +158,10 @@ def strip_html(raw_html: str) -> str:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
+    # WAL lets report.py/trend.py read concurrently with a write in progress
+    # instead of blocking on it; the connection's `timeout` (set at connect())
+    # covers the remaining case of two writers overlapping.
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS daily_threads (
@@ -380,8 +387,17 @@ def find_recent_daily_threads(subreddit: str, days_back: int) -> list[tuple[str,
     return results
 
 
+MENTIONS_COMMIT_BATCH = 500  # commit periodically during a big rescan, not one giant transaction
+
+
 def extract_pending_mentions(conn: sqlite3.Connection, known_stock_symbols: set[str]) -> int:
-    """Extract ticker/coin mentions for any stored comment not yet processed."""
+    """Extract ticker/coin mentions for any stored comment not yet processed.
+
+    Commits in batches rather than one transaction for the whole scan: after a
+    `DELETE FROM mentions` this reprocesses every historical comment (could be
+    tens of thousands), and holding a single write lock that long starves the
+    concurrent live poll of its own writes (`database is locked`).
+    """
     rows = conn.execute(
         """
         SELECT id, body FROM comments
@@ -389,7 +405,7 @@ def extract_pending_mentions(conn: sqlite3.Connection, known_stock_symbols: set[
         """
     ).fetchall()
 
-    for comment_id, body in rows:
+    for index, (comment_id, body) in enumerate(rows, start=1):
         found = tickers.extract_symbols(body, known_stock_symbols)
         if not found:
             # mark as processed with no mentions found, so it isn't rescanned every run
@@ -400,6 +416,9 @@ def extract_pending_mentions(conn: sqlite3.Connection, known_stock_symbols: set[
                 "INSERT OR IGNORE INTO mentions (comment_id, symbol, confidence) VALUES (?, ?, ?)",
                 (comment_id, symbol, confidence),
             )
+
+        if index % MENTIONS_COMMIT_BATCH == 0:
+            conn.commit()
 
     conn.commit()
     return len(rows)
@@ -535,6 +554,30 @@ def run_backfill(conn: sqlite3.Connection, days_back: int) -> None:
         print(f"  {date_iso}  +{new_count:>4} new, {stored:>4} stored  {title}")
 
 
+def acquire_lock() -> bool:
+    """Best-effort mutex so an overlapping cron run doesn't collide with one
+    still in progress (a slow rate-limit backoff, or a big mentions rescan,
+    can easily outlast a 3-minute cron interval). Returns False if another
+    instance already holds the lock and it isn't stale."""
+    if LOCK_PATH.exists():
+        age = time.time() - LOCK_PATH.stat().st_mtime
+        if age < LOCK_STALE_SECONDS:
+            return False
+        LOCK_PATH.unlink(missing_ok=True)  # previous run likely crashed without cleaning up
+
+    try:
+        fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+
+
+def release_lock() -> None:
+    LOCK_PATH.unlink(missing_ok=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Incrementally archive r/wallstreetbets' Daily Discussion comments."
@@ -554,20 +597,27 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    conn = sqlite3.connect(DB_PATH)
-    init_db(conn)
+    if not acquire_lock():
+        print("Another run is already in progress; skipping this one.")
+        return
 
-    if args.backfill is not None:
-        run_backfill(conn, args.backfill)
-    else:
-        run_live(conn)
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        init_db(conn)
 
-    known_stock_symbols = tickers.load_known_stock_symbols()
-    processed = extract_pending_mentions(conn, known_stock_symbols)
-    if processed:
-        print(f"Scanned {processed} new comment(s) for ticker/coin mentions.")
+        if args.backfill is not None:
+            run_backfill(conn, args.backfill)
+        else:
+            run_live(conn)
 
-    conn.close()
+        known_stock_symbols = tickers.load_known_stock_symbols()
+        processed = extract_pending_mentions(conn, known_stock_symbols)
+        if processed:
+            print(f"Scanned {processed} new comment(s) for ticker/coin mentions.")
+
+        conn.close()
+    finally:
+        release_lock()
 
 
 if __name__ == "__main__":
