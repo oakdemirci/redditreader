@@ -125,6 +125,17 @@ def main() -> None:
         help="Hide symbols with no mention in this many most-recent days "
         "(default 2). 0 disables the filter and shows everything in the window.",
     )
+    parser.add_argument(
+        "--top", type=int, default=None, metavar="N",
+        help="Only print the top N rows (the table is already ranked by relevance "
+        "score - recency, today's volume, cashtag confirmation, HOT/NEW). "
+        "Default: print everything that passes the other filters.",
+    )
+    parser.add_argument(
+        "--cashtags-only", action="store_true",
+        help="Hide symbols with zero cashtag ($) confirmations - i.e. bareword-only "
+        "matches, the noisiest tier. Keeps only symbols with at least one real $TICKER mention.",
+    )
     args = parser.parse_args()
 
     days = window_days(args.days)
@@ -176,6 +187,8 @@ def main() -> None:
         days_stale = (date.fromisoformat(today_str) - date.fromisoformat(last_seen)).days
         if args.stale_days and days_stale >= args.stale_days:
             continue
+        if args.cashtags_only and cashtags == 0:
+            continue
 
         prior_sov = [
             share_of_voice(n, comment_counts.get(d, 0))
@@ -203,6 +216,9 @@ def main() -> None:
         scored.append((score, symbol, total, cashtags, first_seen, per_day, today_n, recent_n, flags))
 
     scored.sort(key=lambda r: (-r[0], -r[2], r[1]))
+    total_matching = len(scored)
+    if args.top is not None:
+        scored = scored[: args.top]
 
     recent_label = f"{args.recent_hours:g}h"
     day_labels = "".join(f"{d[5:]:>6}" for d in shown_days)  # MM-DD
@@ -210,6 +226,8 @@ def main() -> None:
         f"{'SYM':<6}{'TOT':>4}{'$':>3}  {'1ST':<6}{day_labels}"
         f"{recent_label:>6}  FLAGS"
     )
+    if args.top is not None:
+        print(f"Showing top {len(scored)} of {total_matching} (by relevance score)\n")
     print(header)
     print("-" * len(header))
     if not scored:
