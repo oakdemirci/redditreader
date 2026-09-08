@@ -10,6 +10,31 @@ DB_PATH = Path(__file__).parent / "wsb_comments.db"
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
+def show_symbol_comments(conn: sqlite3.Connection, symbol: str) -> None:
+    """Print every stored comment that triggered a mention of `symbol`, across
+    all archived days, so a summary-table entry can be manually sanity-checked."""
+    rows = conn.execute(
+        """
+        SELECT dt.date, dt.kind, m.confidence, c.author, c.posted_at, c.body
+        FROM mentions m
+        JOIN comments c ON c.id = m.comment_id
+        JOIN daily_threads dt ON dt.thread_id = c.thread_id
+        WHERE m.symbol = ?
+        ORDER BY c.posted_at
+        """,
+        (symbol,),
+    ).fetchall()
+
+    if not rows:
+        print(f"No stored comments mention {symbol}.")
+        return
+
+    print(f"{len(rows)} comment(s) mentioning {symbol}:\n")
+    for date_str, kind, confidence, author, posted_at, body in rows:
+        print(f"[{date_str} {kind}] [{confidence}] {posted_at}  {author}")
+        print(f"  {body}\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Most-mentioned tickers/coins for a stored day's WSB megathreads."
@@ -25,9 +50,21 @@ def main() -> None:
         action="store_true",
         help="Break the counts out by source thread (daily / moves) instead of merging.",
     )
+    parser.add_argument(
+        "--symbol",
+        metavar="SYM",
+        help="Show the actual stored comments behind this symbol's mentions "
+        "(across all archived days, ignoring --date) instead of the summary table. "
+        "Use this to sanity-check anything the summary flags as suspicious.",
+    )
     args = parser.parse_args()
 
     conn = sqlite3.connect(DB_PATH)
+
+    if args.symbol:
+        show_symbol_comments(conn, args.symbol.upper())
+        conn.close()
+        return
 
     threads = conn.execute(
         "SELECT kind, thread_id, title FROM daily_threads WHERE date = ? ORDER BY kind",

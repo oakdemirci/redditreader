@@ -45,7 +45,9 @@ STOPWORDS = {
     "SUCH", "VERY", "JUST", "DOWN", "MUCH", "MANY", "STILL", "EVERY",
     "MAKE", "MADE", "TAKE", "TOOK", "COME", "CAME", "LOOK", "LOOKS",
     "WANT", "NEED", "KNOW", "THINK", "GUYS", "GUY", "SIR", "PPI", "CPI",
-    "JPY", "USD", "EUR", "GBP", "CAD", "AUD", "CHF", "NZD", "ES", "NQ",
+    "JPY", "USD", "EUR", "GBP", "CAD", "AUD", "CHF", "NZD", "NOK", "SEK",
+    "DKK", "PLN", "HKD", "SGD", "KRW", "INR", "MXN", "BRL", "ZAR", "TRY",
+    "ES", "NQ",
     "SPX", "VIX", "KEEL", "HOLY", "SHIT", "FUCK", "DAMN", "OMG",
     "TBH", "NGL", "AF", "IRL", "OP", "TIL", "PS", "BTW", "IDK", "IDC",
 }
@@ -85,17 +87,26 @@ def load_known_stock_symbols() -> set[str]:
 
 
 def extract_symbols(text: str, known_stock_symbols: set[str]) -> list[tuple[str, str]]:
-    """Returns a list of (symbol, confidence) tuples found in the text."""
+    """Returns a list of (symbol, confidence) tuples found in the text.
+
+    Confidence tiers, highest to lowest:
+      cashtag    - $SYMBOL and it's a real, listed stock or a known crypto symbol
+      bareword   - plain all-caps word matched against the same lists (noisier)
+      unverified - $SYMBOL but not found in either list (typo, joke, or a
+                   ticker too obscure/delisted for our reference data)
+    """
+    known = known_stock_symbols | CRYPTO_SYMBOLS
     matches: dict[str, str] = {}
 
     for raw in CASHTAG_RE.findall(text):
-        matches[raw.upper()] = "cashtag"
+        symbol = raw.upper()
+        matches[symbol] = "cashtag" if symbol in known else "unverified"
 
     for raw in BAREWORD_RE.findall(text):
         symbol = raw.upper()
         if symbol in matches or symbol in STOPWORDS:
             continue
-        if symbol in known_stock_symbols or symbol in CRYPTO_SYMBOLS:
+        if symbol in known:
             matches[symbol] = "bareword"
 
     return list(matches.items())

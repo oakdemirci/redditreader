@@ -10,6 +10,11 @@ mentions in the last few hours, and flags:
   HOT   today's share-of-voice is >= 2x the prior days' average (momentum)
   $     at least one $-cashtag mention (higher confidence it's really a ticker)
 
+By default, symbols with no mention in the last `--stale-days` (2) days are
+hidden entirely — an old one-off reference otherwise sits in the table
+indistinguishable from something actually trending. Pass --stale-days 0 to
+see everything in the window regardless of how dead it is.
+
 Backfilled days hold only a partial sample (~370 comments, Daily Discussion
 only) while live days accumulate both threads all day, so raw counts aren't
 comparable across them. The HOT flag compares *share of voice* (mentions per
@@ -115,6 +120,11 @@ def main() -> None:
         "--recent-hours", type=float, default=4.0,
         help="Look-back window for the intraday velocity column (default 4).",
     )
+    parser.add_argument(
+        "--stale-days", type=int, default=2,
+        help="Hide symbols with no mention in this many most-recent days "
+        "(default 2). 0 disables the filter and shows everything in the window.",
+    )
     args = parser.parse_args()
 
     days = window_days(args.days)
@@ -158,9 +168,14 @@ def main() -> None:
             continue
 
         first_seen = min(per_day)
+        last_seen = max(per_day)
         today_n = per_day.get(today_str, 0)
         recent_n = recent.get(symbol, 0)
         cashtags = cashtag_counts.get(symbol, 0)
+
+        days_stale = (date.fromisoformat(today_str) - date.fromisoformat(last_seen)).days
+        if args.stale_days and days_stale >= args.stale_days:
+            continue
 
         prior_sov = [
             share_of_voice(n, comment_counts.get(d, 0))
@@ -213,7 +228,11 @@ def main() -> None:
         f"then mentions per day, then mentions in the last {recent_label}.\n"
         "Notes: 'partial backfill' days hold ~370 comments vs thousands on a full day, so raw\n"
         "counts aren't comparable — HOT uses share-of-voice (mentions per comment) instead.\n"
-        "No '$' = bareword-only match; words like TIME/BE/OR/UP collide with real tickers."
+        "No '$' = bareword-only match; words like TIME/BE/OR/UP collide with real tickers.\n"
+        "A $-tagged mention not in our real ticker/crypto lists (typo, joke, or too obscure)\n"
+        "still counts toward TOT but not toward $ — see tickers.py's 'unverified' tier.\n"
+        f"Stale symbols (nothing in {args.stale_days} day(s)) are hidden; use --stale-days 0\n"
+        "to see them, or report.py --symbol SYM to inspect the actual comments behind any entry."
     )
 
 
