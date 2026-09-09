@@ -1,9 +1,30 @@
 # mydiggerapp
 
 A personal script that incrementally archives r/wallstreetbets' rolling
-discussion megathreads over the course of a day, using Reddit's public RSS feeds.
+discussion megathreads over the course of a day.
 
-## How it works
+## Two pipelines
+
+**`mydigger.py` (RSS)** — the original, documented below. Reddit's public
+Atom/RSS feeds, no login: ~100 comments per thread, no reply tree, no scores.
+
+**`digger.py` (Arctic Shift)** — the new pipeline, being built out per
+[`docs/PLAN.md`](docs/PLAN.md). Reads the keyless [Arctic Shift]
+(https://arctic-shift.photon-reddit.com) archive: full comment trees, every
+field, hourly delta ingest into `hermes.db` (SQLite).
+
+    python ingest.py --thread 1wbh9od          # one thread, all comments -> hermes.db
+    python ingest.py --window 2026-09-08 2026-09-10 --kinds daily,moves
+    python digger.py --catch-up                # hourly delta job (see systemd/)
+    python ingest.py --stats                   # watermarks, last run
+
+Modules: `arctic.py` (client), `store.py` (schema + tree reconstruction),
+`ingest.py` (discovery + CLI), `digger.py` (the scheduled job). `wsb_tree.py`
+is a thin wrapper that also writes one JSON file per thread.
+
+---
+
+## How `mydigger.py` works
 
 - Reads Reddit's public, unauthenticated Atom/RSS feeds (`/r/<subreddit>/.rss`
   and `/r/<subreddit>/comments/<id>/.rss`) — the same feature used by any RSS

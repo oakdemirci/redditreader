@@ -1,0 +1,36 @@
+# Hermes WSB digger -- hourly delta ingest from the Arctic Shift archive.
+# Paired with hermes-digger.timer. Full install steps land in Phase 4;
+# the short version:
+#
+#   sudo cp systemd/hermes-digger.* /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now hermes-digger.timer
+#   systemctl list-timers hermes-digger.timer
+#   journalctl -u hermes-digger.service -f
+#
+# Assumes the repo checked out at /opt/hermes-digger with a venv at .venv and a
+# dedicated `hermes` user owning it.
+
+[Unit]
+Description=Hermes WSB digger (hourly delta ingest from Arctic Shift)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes-digger
+ExecStart=/opt/hermes-digger/.venv/bin/python /opt/hermes-digger/digger.py --catch-up
+Nice=10
+TimeoutStartSec=3600
+
+# hardening (the digger only needs to read the repo and write hermes.db* + digger.lock)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/hermes-digger
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

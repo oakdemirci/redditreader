@@ -26,7 +26,7 @@ from pathlib import Path
 
 from arctic import bare_id
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS threads (
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS threads (
     first_seen   TEXT NOT NULL,             -- ISO-8601 UTC, first time we ingested it
     last_polled  TEXT,                      -- ISO-8601 UTC, last comment fetch
     is_open      INTEGER NOT NULL DEFAULT 1,-- 0 once the thread is old and quiet
+    comments_through INTEGER,               -- epoch; comments confirmed fetched up to here
     post_json    TEXT NOT NULL              -- full submission object
 );
 
@@ -127,12 +128,27 @@ def connect(path: str | Path = DEFAULT_DB) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.execute(
-        "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
+        "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (str(SCHEMA_VERSION),),
     )
     conn.commit()
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring a pre-existing DB up to the current schema. Additive only."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(threads)")}
+    if "comments_through" not in cols:  # v1 -> v2
+        conn.execute("ALTER TABLE threads ADD COLUMN comments_through INTEGER")
+        conn.execute(
+            "UPDATE threads SET comments_through = COALESCE("
+            "  (SELECT MAX(created_utc) FROM comments WHERE comments.thread_id = threads.id),"
+            "  created_utc)"
+        )
+    conn.commit()
 
 
 # --------------------------------------------------------------------------- #
@@ -146,9 +162,10 @@ def upsert_thread(conn: sqlite3.Connection, kind: str, post: dict,
     conn.execute(
         """
         INSERT INTO threads (id, kind, subreddit, title, flair, created_utc,
-                             permalink, first_seen, last_polled, is_open, post_json)
+                             permalink, first_seen, last_polled, is_open,
+                             comments_through, post_json)
         VALUES (:id, :kind, :subreddit, :title, :flair, :created_utc,
-                :permalink, :now, :now, :is_open, :post_json)
+                :permalink, :now, :now, :is_open, :created_utc, :post_json)
         ON CONFLICT(id) DO UPDATE SET
             kind        = excluded.kind,
             title       = excluded.title,
@@ -267,6 +284,80 @@ def finish_run(conn: sqlite3.Connection, run_id: int, status: str, *,
     conn.commit()
 
 
+# --- watermarks & thread lifecycle (the hourly digger) ------------------- #
+def get_meta(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+
+
+def open_threads(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Threads still accepting comments, oldest first."""
+    return conn.execute(
+        "SELECT id, kind, title, created_utc, comments_through, last_polled "
+        "FROM threads WHERE is_open = 1 ORDER BY created_utc"
+    ).fetchall()
+
+
+def resume_ts(conn: sqlite3.Connection, thread_id: str) -> int:
+    """Epoch to resume a thread's comment fetch from: its watermark, else the
+    newest comment stored, else its creation time."""
+    row = conn.execute(
+        "SELECT comments_through, created_utc FROM threads WHERE id = ?",
+        (bare_id(thread_id),),
+    ).fetchone()
+    if row and row["comments_through"] is not None:
+        return row["comments_through"]
+    newest = conn.execute(
+        "SELECT MAX(created_utc) FROM comments WHERE thread_id = ?",
+        (bare_id(thread_id),),
+    ).fetchone()[0]
+    if newest is not None:
+        return newest
+    return (row["created_utc"] if row else 0) or 0
+
+
+def set_comments_through(conn: sqlite3.Connection, thread_id: str, epoch: int) -> None:
+    """Advance the watermark (never move it backwards)."""
+    conn.execute(
+        "UPDATE threads SET comments_through = MAX(COALESCE(comments_through, 0), ?) "
+        "WHERE id = ?",
+        (epoch, bare_id(thread_id)),
+    )
+    conn.commit()
+
+
+def close_stale_threads(conn: sqlite3.Connection, now_epoch: int, *,
+                        max_age_hours: int = 48, quiet_hours: int = 12) -> list[str]:
+    """Close threads older than ``max_age_hours`` whose newest comment is older
+    than ``quiet_hours``. Returns the ids closed."""
+    cutoff_age = now_epoch - max_age_hours * 3600
+    cutoff_quiet = now_epoch - quiet_hours * 3600
+    ids = [
+        r[0] for r in conn.execute(
+            """
+            SELECT id FROM threads WHERE is_open = 1 AND created_utc < ?
+              AND COALESCE(
+                    (SELECT MAX(created_utc) FROM comments WHERE comments.thread_id = threads.id),
+                    created_utc) < ?
+            """,
+            (cutoff_age, cutoff_quiet),
+        )
+    ]
+    if ids:
+        conn.executemany("UPDATE threads SET is_open = 0 WHERE id = ?", [(i,) for i in ids])
+        conn.commit()
+    return ids
+
+
 # --------------------------------------------------------------------------- #
 #  reads                                                                       #
 # --------------------------------------------------------------------------- #
@@ -375,6 +466,7 @@ def stats(conn: sqlite3.Connection) -> dict:
         "threads": thr["n"] or 0,
         "threads_open": thr["open"] or 0,
         "comments": com,
+        "discovery_through": get_meta(conn, "discovery_through"),
         "last_run": dict(last) if last else None,
         "last_successful_end": last_successful_end(conn),
     }

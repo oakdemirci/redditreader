@@ -1,0 +1,16 @@
+# Fires the digger a few minutes past every hour. Persistent=true means a run
+# missed while the box was off is executed once on the next boot; digger.py
+# --catch-up then replays every pending hour from its watermark.
+
+[Unit]
+Description=Run the Hermes WSB digger every hour
+
+[Timer]
+OnCalendar=*-*-* *:05:00
+Persistent=true
+# spread load off the exact top-of-hour so we're not hammering Arctic Shift
+# in lockstep with everyone else's cron
+RandomizedDelaySec=180
+
+[Install]
+WantedBy=timers.target

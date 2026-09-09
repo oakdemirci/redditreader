@@ -121,7 +121,32 @@ Keep the old `wsb_tree.py` working as a thin wrapper over the new modules
 counts and depth; re-running the same ingest is idempotent (0 new rows); `runs`
 row written.
 
-### Phase 2 — Hourly delta digger + scheduler
+### Phase 2 — Hourly delta digger + scheduler  ✅ done (2026-09-10)
+
+Shipped as `digger.py` + `systemd/hermes-digger.{service,timer}`. Design choices
+worth carrying forward:
+
+* **Two watermarks, not one.** `meta.discovery_through` (how far the new-thread
+  scan reached) is global; `threads.comments_through` is per thread. This
+  resolves the Phase 1 open question: a per-thread fetch failure leaves *that*
+  thread's watermark alone, so its gap is re-pulled next run, while the slice
+  still completes. Only a failure in the discovery scan itself holds a slice back.
+* Work is done in **hourly slices**, each its own `runs` row + commit. A healthy
+  tick does one slice; after downtime `--catch-up` replays the backlog
+  oldest-first (resumable). Without `--catch-up` a behind digger advances one
+  hour per tick and warns.
+* Slices overlap by 1 second on the read side (`after = frm - 1`,
+  `iter_posts(start - 1, ...)`) so a row on the exact boundary can't slip between
+  an exclusive `before` and the next exclusive `after`. Idempotent upserts absorb
+  the re-read.
+* `schema_version` 1 -> 2 migration (`ALTER TABLE threads ADD comments_through`,
+  backfilled from each thread's newest stored comment) runs automatically in
+  `store.connect()`.
+* Verified: 4 contiguous slices, correct per-hour comment deltas on a live daily
+  (470 / 603 / 700 ...), a full re-run inserts nothing, the lock blocks a second
+  instance.
+
+Original spec:
 
 Build `digger.py`: the automatic hourly job. Compute the window from the last
 successful `runs` row (`[last_end, floor(now, 1h))`); on a gap > 1h, iterate
