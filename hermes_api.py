@@ -70,6 +70,9 @@ def _connect(db) -> sqlite3.Connection:
 # --------------------------------------------------------------------------- #
 #  trend                                                                       #
 # --------------------------------------------------------------------------- #
+_SENT_TOKEN = {"buy": "BUY", "sell": "SELL", "neutral": "NEU"}
+
+
 @dataclass
 class TrendRow:
     symbol: str
@@ -81,6 +84,8 @@ class TrendRow:
     recent_n: int
     flags: list[str]
     score: int
+    sentiment: str | None = None            # buy | sell | neutral (latest symbol_day)
+    sentiment_conf: float | None = None
 
 
 @dataclass
@@ -173,7 +178,7 @@ def _sov(mentions: int, comments: int) -> float:
 def trend(db, *, days: int = 5, min_total: int = 2, recent_hours: float = 4.0,
           stale_days: int = 2, top_n: int | None = None,
           cashtags_only: bool = False, kinds=MEGA_KINDS,
-          entity_mode: str = "regex") -> TrendReport:
+          entity_mode: str = "regex", with_sentiment: bool = False) -> TrendReport:
     conn = _connect(db)
     kinds = list(kinds)
     window = _window_days(days)
@@ -282,6 +287,15 @@ def trend(db, *, days: int = 5, min_total: int = 2, recent_hours: float = 4.0,
     if top_n is not None:
         scored = scored[:top_n]
 
+    if with_sentiment and scored:
+        sent = store.latest_symbol_sentiment(conn, [r.symbol for r in scored], today)
+        for r in scored:
+            row = sent.get(r.symbol)
+            if row is not None:
+                r.sentiment = row["label"]
+                r.sentiment_conf = row["confidence"]
+                r.flags.append(_SENT_TOKEN.get(row["label"], "NEU"))
+
     return TrendReport(
         window_days=window, shown_days=shown_days, today=today, coverage=coverage,
         rows=scored, total_matching=total_matching, recent_hours=recent_hours,
@@ -310,22 +324,48 @@ class SymbolComment:
 
 
 @dataclass
+class DaySentiment:
+    day: str
+    label: str
+    confidence: float | None
+    rationale: str | None
+
+
+@dataclass
 class SymbolDetail:
     symbol: str
     comments: list[SymbolComment]
+    sentiment: list[DaySentiment] = field(default_factory=list)
 
     def to_text(self) -> str:
+        L: list[str] = []
+        if self.sentiment:
+            L.append(f"Sentiment for {self.symbol} (LLM, per day):")
+            for s in self.sentiment:
+                conf = f" {s.confidence:.2f}" if s.confidence is not None else ""
+                L.append(f"  {s.day}  {s.label.upper():<8}{conf}  {s.rationale or ''}")
+            L.append("")
         if not self.comments:
-            return f"No stored comments mention {self.symbol}."
-        L = [f"{len(self.comments)} comment(s) mentioning {self.symbol}:\n"]
+            L.append(f"No stored comments mention {self.symbol}.")
+            return "\n".join(L)
+        L.append(f"{len(self.comments)} comment(s) mentioning {self.symbol}:\n")
         for c in self.comments:
             L.append(f"[{c.trading_day} {c.kind}] [{c.tier or '-'}] {c.when}  {c.author}")
             L.append(f"  {c.body}\n")
         return "\n".join(L)
 
 
+def symbol_sentiment(db, symbol: str, *, limit: int = 14) -> list[DaySentiment]:
+    conn = _connect(db)
+    return [
+        DaySentiment(r["window_start"], r["label"], r["confidence"], r["rationale"])
+        for r in store.sentiment_history(conn, symbol, limit)
+    ]
+
+
 def symbol_detail(db, symbol: str, *, days: int | None = None,
-                  entity_mode: str = "regex") -> SymbolDetail:
+                  entity_mode: str = "regex",
+                  with_sentiment: bool = False) -> SymbolDetail:
     conn = _connect(db)
     symbol = symbol.upper()
     sql = [f"""SELECT DISTINCT t.trading_day, t.kind, e.tier, c.author, c.created_utc, c.body
@@ -340,11 +380,12 @@ def symbol_detail(db, symbol: str, *, days: int | None = None,
         params.append(cutoff)
     sql.append("ORDER BY c.created_utc")
     rows = conn.execute(" ".join(sql), params).fetchall()
-    return SymbolDetail(symbol, [
-        SymbolComment(r["trading_day"], r["kind"], r["tier"], r["author"],
-                      r["created_utc"], r["body"] or "")
-        for r in rows
-    ])
+    return SymbolDetail(
+        symbol,
+        [SymbolComment(r["trading_day"], r["kind"], r["tier"], r["author"],
+                       r["created_utc"], r["body"] or "") for r in rows],
+        sentiment=symbol_sentiment(conn, symbol) if with_sentiment else [],
+    )
 
 
 # --------------------------------------------------------------------------- #

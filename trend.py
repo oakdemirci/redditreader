@@ -54,6 +54,8 @@ def main() -> None:
                    help="which mention tier to count (default: regex)")
     p.add_argument("--llm", action="store_true",
                    help="shorthand for --entity-mode best (LLM disambiguation)")
+    p.add_argument("--sentiment", action="store_true",
+                   help="append the LLM BUY/SELL/NEU tag to FLAGS")
     args = p.parse_args()
 
     kinds = list(hermes_api.MEGA_KINDS)
@@ -65,6 +67,7 @@ def main() -> None:
         conn, days=args.days, min_total=args.min_total, recent_hours=args.recent_hours,
         stale_days=args.stale_days, top_n=args.top, cashtags_only=args.cashtags_only,
         kinds=kinds, entity_mode="best" if args.llm else args.entity_mode,
+        with_sentiment=args.sentiment,
     )
     if not report.shown_days:
         print("No thread data in this window yet.")

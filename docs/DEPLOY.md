@@ -34,9 +34,14 @@ Review `/opt/hermes-digger/.env`:
 * `HERMES_KINDS` -- megathreads only by default; add `gain,loss,discussion` to
   also track flaired standalone posts.
 * `DEEPSEEK_API_KEY` -- optional. Empty = keyless (regex ticker extraction only).
-  Set it to turn on the LLM disambiguation pass (`enrich_entities.py`), capped at
-  `HERMES_LLM_DAILY_USD` (default $1/day; real cost is ~$2/month for megathreads).
-  Then `trend.py --llm` / `report.py --llm` count the blended tier.
+  Set it to turn on the LLM passes:
+  * `enrich_entities.py` (ticker disambiguation), run by the hourly digger;
+  * `enrich_sentiment.py` (buy/sell/neutral per symbol per day), run by
+    `hermes-digger-sentiment.timer` twice daily (16:20 & 23:20 UTC).
+  Both are capped by `HERMES_LLM_DAILY_USD` (default $1/day). Real cost is
+  ~$2/month entities + ~$1.7/month sentiment for megathreads. Then `trend.py
+  --llm` / `report.py --llm` count the blended tier; `trend.py --sentiment` adds
+  the BUY/SELL/NEU tag.
 
 ## 3. Backfill initial history
 
@@ -127,6 +132,8 @@ restic ... forget --keep-daily 14 --keep-weekly 8 --prune
 | DB size accounting | `sudo -u hermes .venv/bin/python maintain.py --report` |
 | LLM spend / status | `sudo -u hermes .venv/bin/python enrich_entities.py --stats` |
 | LLM extraction now | `sudo -u hermes .venv/bin/python enrich_entities.py` |
+| sentiment now | `sudo -u hermes .venv/bin/python enrich_sentiment.py` |
+| preview sentiment cost | `sudo -u hermes .venv/bin/python enrich_sentiment.py --dry-run` |
 
 ### Troubleshooting
 

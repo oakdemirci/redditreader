@@ -46,7 +46,7 @@ def main() -> None:
 
     if args.symbol:
         print(hermes_api.symbol_detail(conn, args.symbol, days=args.days,
-                                       entity_mode=mode).to_text())
+                                       entity_mode=mode, with_sentiment=True).to_text())
         return
 
     kinds = list(hermes_api.MEGA_KINDS)

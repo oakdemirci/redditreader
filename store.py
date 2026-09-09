@@ -99,14 +99,15 @@ CREATE INDEX IF NOT EXISTS entities_symbol ON entities(symbol);
 CREATE INDEX IF NOT EXISTS entities_comment ON entities(comment_id);
 CREATE INDEX IF NOT EXISTS entities_source ON entities(source, comment_id);
 
--- Populated by Phase 7 (LLM sentiment). Shape frozen now.
+-- LLM sentiment (Phase 7). scope 'symbol_day' rows carry window_start = the
+-- trading day at 00:00Z; 'comment' rows carry comment_id.
 CREATE TABLE IF NOT EXISTS sentiment (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     scope        TEXT NOT NULL,             -- comment | symbol_thread | symbol_day
     symbol       TEXT NOT NULL,
     comment_id   TEXT,
     thread_id    TEXT,
-    window_start TEXT,
+    window_start TEXT,                      -- trading day (YYYY-MM-DD) for symbol_day
     window_end   TEXT,
     label        TEXT NOT NULL,             -- buy | sell | neutral
     confidence   REAL,
@@ -116,6 +117,7 @@ CREATE TABLE IF NOT EXISTS sentiment (
     created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sentiment_symbol ON sentiment(symbol);
+CREATE INDEX IF NOT EXISTS sentiment_day ON sentiment(scope, window_start, symbol);
 CREATE UNIQUE INDEX IF NOT EXISTS sentiment_uniq ON sentiment(
     scope, symbol, IFNULL(comment_id, ''), IFNULL(thread_id, ''),
     IFNULL(window_start, ''), IFNULL(prompt_ver, '')
@@ -389,6 +391,105 @@ def save_entities(conn: sqlite3.Connection, comment_id: str,
             for r in rows
         ],
     )
+
+
+# --- sentiment (Phase 7) ----------------------------------------------- #
+def symbol_day_candidates(conn: sqlite3.Connection, since_day: str, *,
+                          min_mentions: int, kinds: list[str],
+                          entity_where: str) -> list[tuple[str, str, int]]:
+    """(trading_day, symbol, mentions) worth a sentiment call, newest day first."""
+    kph = ",".join("?" * len(kinds))
+    return [
+        (r[0], r[1], r[2]) for r in conn.execute(
+            f"""SELECT t.trading_day, e.symbol, COUNT(DISTINCT e.comment_id) n
+                FROM entities e
+                JOIN comments c ON c.id = e.comment_id
+                JOIN threads t ON t.id = c.thread_id
+                WHERE t.trading_day >= ? AND e.symbol != '__none__'
+                  AND t.kind IN ({kph}) AND {entity_where}
+                GROUP BY t.trading_day, e.symbol
+                HAVING n >= ?
+                ORDER BY t.trading_day DESC, n DESC""",
+            [since_day, *kinds, min_mentions],
+        )
+    ]
+
+
+def symbol_day_comments(conn: sqlite3.Connection, day: str, symbol: str, *,
+                        kinds: list[str], entity_where: str,
+                        limit: int = 40) -> list[tuple[str, str, int]]:
+    """Up to `limit` comments mentioning `symbol` on `day`, highest score first."""
+    kph = ",".join("?" * len(kinds))
+    return [
+        (r[0], r[1] or "", r[2] or 0) for r in conn.execute(
+            f"""SELECT DISTINCT c.id, c.body, c.score
+                FROM entities e
+                JOIN comments c ON c.id = e.comment_id
+                JOIN threads t ON t.id = c.thread_id
+                WHERE t.trading_day = ? AND e.symbol = ?
+                  AND t.kind IN ({kph}) AND {entity_where}
+                ORDER BY c.score DESC NULLS LAST, c.created_utc DESC
+                LIMIT ?""",
+            [day, symbol, *kinds, limit],
+        )
+    ]
+
+
+def save_sentiment(conn: sqlite3.Connection, *, scope: str, symbol: str,
+                   label: str, confidence: float | None, rationale: str | None,
+                   model: str | None, prompt_ver: str | None,
+                   comment_id: str | None = None, thread_id: str | None = None,
+                   window_start: str | None = None, window_end: str | None = None) -> None:
+    conn.execute(
+        """INSERT INTO sentiment (scope, symbol, comment_id, thread_id, window_start,
+               window_end, label, confidence, rationale, model, prompt_ver, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT (scope, symbol, IFNULL(comment_id,''), IFNULL(thread_id,''),
+                        IFNULL(window_start,''), IFNULL(prompt_ver,''))
+           DO UPDATE SET label=excluded.label, confidence=excluded.confidence,
+               rationale=excluded.rationale, model=excluded.model,
+               created_at=excluded.created_at, window_end=excluded.window_end""",
+        (scope, symbol, comment_id, thread_id, window_start, window_end, label,
+         confidence, rationale, model, prompt_ver, _now_iso()),
+    )
+    conn.commit()
+
+
+def has_symbol_day_sentiment(conn: sqlite3.Connection, day: str, symbol: str,
+                             prompt_ver: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sentiment WHERE scope='symbol_day' AND symbol=? "
+        "AND window_start=? AND prompt_ver=? LIMIT 1",
+        (symbol, day, prompt_ver),
+    ).fetchone() is not None
+
+
+def latest_symbol_sentiment(conn: sqlite3.Connection, symbols: list[str],
+                            on_or_before_day: str) -> dict[str, sqlite3.Row]:
+    """Most recent symbol_day sentiment per symbol, not after `on_or_before_day`."""
+    if not symbols:
+        return {}
+    sph = ",".join("?" * len(symbols))
+    rows = conn.execute(
+        f"""SELECT s.symbol, s.window_start, s.label, s.confidence, s.rationale
+            FROM sentiment s
+            JOIN (SELECT symbol, MAX(window_start) mx FROM sentiment
+                  WHERE scope='symbol_day' AND symbol IN ({sph}) AND window_start <= ?
+                  GROUP BY symbol) last
+              ON last.symbol = s.symbol AND last.mx = s.window_start
+            WHERE s.scope='symbol_day'""",
+        [*symbols, on_or_before_day],
+    ).fetchall()
+    return {r["symbol"]: r for r in rows}
+
+
+def sentiment_history(conn: sqlite3.Connection, symbol: str,
+                      limit: int = 14) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT window_start, label, confidence, rationale FROM sentiment "
+        "WHERE scope='symbol_day' AND symbol=? ORDER BY window_start DESC LIMIT ?",
+        (symbol.upper(), limit),
+    ).fetchall()
 
 
 # --- watermarks & thread lifecycle (the hourly digger) ------------------- #

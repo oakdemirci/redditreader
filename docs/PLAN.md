@@ -343,7 +343,36 @@ Wire it into the digger as a post-ingest step over new comments only.
 sample; measured cost per 1k comments; re-run with unchanged `prompt_ver` makes
 zero API calls.
 
-### Phase 7 — LLM sentiment: buy / sell / neutral — requirement 5.2
+### Phase 7 — LLM sentiment: buy / sell / neutral — requirement 5.2  ✅ done (2026-09-10)
+
+Shipped: `enrich_sentiment.py`, `sentiment` table filled (scope `symbol_day` +
+`comment`), `hermes_api` sentiment wiring, `systemd/hermes-digger-sentiment.*`
+(twice-daily, NOT in the hourly digger -- today's day is re-scored as it grows,
+so hourly would just churn budget).
+
+* **Granularity: `symbol_day` primary** (Phase 6 cost was tiny, so affordable).
+  One call per (symbol, trading day) over a sample of that day's comments
+  mentioning it; `--per-comment` for drill-down. `min_mentions` default 6.
+* Cache key = `hash(symbol + sorted comment-ids) + prompt_ver` -> a closed day is
+  called once; today re-calls only when its comment set changes. `--force`
+  re-scores but still hits the cache if the set is unchanged (labels stable).
+* `hermes_api.trend(with_sentiment=True)` appends `BUY`/`SELL`/`NEU` to a row's
+  FLAGS (keeps the fixed-width table shape -- no new column). `symbol_detail
+  (with_sentiment=True)` and `symbol_sentiment()` return the per-day history.
+  `trend.py --sentiment`, `report.py --symbol` (always on), `render.py`.
+* `store.save_sentiment` upserts via the existing expression unique index
+  (`ON CONFLICT (scope, symbol, IFNULL(...))`).
+* **Cost: ~75 symbol-days on a busy day at min-mentions 6 -> ~$0.0006/call ->
+  ~$0.055/day -> ~$1.7/month** for megathreads; `--dry-run` previews the
+  candidate list keylessly. Well under the daily cap.
+* Tests: `tests/test_enrich_sentiment.py` (5) -- scoring, cache=stable-rerun,
+  budget stop, trend/symbol_detail integration, per-comment mode.
+
+Acceptance: labels stable at a fixed `prompt_ver` (cache + `--force` test);
+`trend()` shows the tag; cost measured + capped. Manual agreement check needs a
+key + the user.
+
+Original spec:
 
 Build `enrich_sentiment.py` on the Phase 6 LLM infra. Primary mode: per
 `(symbol, thread)` or `(symbol, day)` aggregate — feed the symbol's mentions for

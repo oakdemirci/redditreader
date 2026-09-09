@@ -18,8 +18,9 @@ field, hourly delta ingest into `hermes.db` (SQLite).
     python digger.py --catch-up                # hourly delta job (see systemd/)
     python extract.py                          # regex ticker/coin -> entities
     python enrich_entities.py                  # LLM disambiguation (needs DEEPSEEK_API_KEY)
-    python trend.py --llm                      # SYM table, LLM-blended tier
-    python report.py --symbol AAPL
+    python enrich_sentiment.py                 # LLM buy/sell/neutral per symbol per day
+    python trend.py --llm --sentiment          # SYM table, LLM-blended tier + BUY/SELL tags
+    python report.py --symbol AAPL             # comments + per-day sentiment for a symbol
     python render.py thread 1wbh9od            # markdown digest of a comment tree
     python maintain.py                         # archive closed threads + VACUUM
     python ingest.py --stats                   # watermarks, last run
@@ -27,11 +28,11 @@ field, hourly delta ingest into `hermes.db` (SQLite).
 Modules: `arctic.py` (client), `store.py` (schema + tree reconstruction +
 retention), `ingest.py` (discovery + CLI), `digger.py` (scheduled job),
 `wsbcal.py` (trading-day calendar), `extract.py` (regex mentions), `llm.py` +
-`enrich_entities.py` (DeepSeek ticker disambiguation), `hermes_api.py` (read-only
-query layer behind `trend.py`/`report.py`), `render.py` (markdown for chat),
-`maintain.py` (retention + VACUUM). `wsb_tree.py` is a thin wrapper that also
-writes one JSON file per thread. `python tests/test_hermes_api.py` and
-`python tests/test_enrich_entities.py` run the fixture tests;
+`enrich_entities.py` + `enrich_sentiment.py` (DeepSeek ticker disambiguation and
+buy/sell/neutral), `hermes_api.py` (read-only query layer behind
+`trend.py`/`report.py`), `render.py` (markdown for chat), `maintain.py`
+(retention + VACUUM). `wsb_tree.py` is a thin wrapper that also writes one JSON
+file per thread. `python tests/test_*.py` run the fixture tests;
 `python tools/eval_entities.py` scores extraction against labeled data.
 
 > `trend.py` and `report.py` now read `hermes.db`. For the old RSS DB, the

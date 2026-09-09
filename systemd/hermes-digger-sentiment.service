@@ -1,0 +1,27 @@
+# LLM sentiment pass (per symbol per trading day). Twice-daily, not in the
+# hourly digger -- today's day is re-scored as it grows, so hourly would just
+# burn budget on churn. No-op without DEEPSEEK_API_KEY.
+
+[Unit]
+Description=Hermes WSB digger LLM sentiment pass
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes-digger
+EnvironmentFile=-/opt/hermes-digger/.env
+ExecStart=/opt/hermes-digger/.venv/bin/python /opt/hermes-digger/enrich_sentiment.py --days 2
+Nice=15
+TimeoutStartSec=1800
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/hermes-digger
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

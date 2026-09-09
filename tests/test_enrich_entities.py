@@ -18,9 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 os.environ["DEEPSEEK_API_KEY"] = "test-key"
 os.environ["HERMES_LLM_DAILY_USD"] = "1.00"
-os.environ["HERMES_LLM_PRICE_IN"] = "1000000"   # $1 per 1M tokens -> easy budget maths
-os.environ["HERMES_LLM_PRICE_OUT"] = "0"
-os.environ["HERMES_LLM_PRICE_IN_CACHED"] = "0"
+os.environ["HERMES_LLM_PRICE_IN"] = "1"      # $1/1M tokens; budget test forces the cap directly
+os.environ["HERMES_LLM_PRICE_OUT"] = "1"
+os.environ["HERMES_LLM_PRICE_IN_CACHED"] = "1"
 
 import clock            # noqa: E402
 import enrich_entities  # noqa: E402

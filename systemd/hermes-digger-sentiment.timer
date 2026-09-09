@@ -1,0 +1,13 @@
+# Midday and after the US close (UTC). Yesterday is cached after the first pass;
+# today gets re-scored on the second.
+
+[Unit]
+Description=Twice-daily Hermes WSB sentiment pass
+
+[Timer]
+OnCalendar=*-*-* 16,23:20:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

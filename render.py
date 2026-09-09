@@ -123,12 +123,20 @@ def trend_block(report) -> str:
 
 
 def symbol_block(detail, *, limit: int = 15) -> str:
+    lines: list[str] = []
+    if getattr(detail, "sentiment", None):
+        lines.append(f"**{detail.symbol}** sentiment (LLM):")
+        for s in detail.sentiment[:7]:
+            conf = f" {s.confidence:.0%}" if s.confidence is not None else ""
+            lines.append(f"- `{s.day}` **{s.label.upper()}**{conf} — {s.rationale or ''}")
+        lines.append("")
     if not detail.comments:
-        return f"_No stored comments mention {detail.symbol}._"
+        lines.append(f"_No stored comments mention {detail.symbol}._")
+        return "\n".join(lines)
     n = len(detail.comments)
     recent = detail.comments[-limit:][::-1]
-    lines = [f"**{detail.symbol}** — {n} mention{'s' if n != 1 else ''} "
-             f"(showing {len(recent)} most recent)", ""]
+    lines += [f"**{detail.symbol}** — {n} mention{'s' if n != 1 else ''} "
+              f"(showing {len(recent)} most recent)", ""]
     for c in recent:
         lines.append(f"- _{c.trading_day} {c.kind}_ · u/{c.author or '[deleted]'} "
                      f"· `{c.tier or '-'}`")
@@ -158,6 +166,7 @@ def main() -> None:
     tr.add_argument("--top", type=int, default=None)
     tr.add_argument("--stale-days", type=int, default=2)
     tr.add_argument("--include-flair", nargs="?", const="gain,loss,discussion", default=None)
+    tr.add_argument("--llm", action="store_true", help="LLM-blended tier + sentiment tags")
 
     s = sub.add_parser("symbol", help="comments behind a symbol")
     s.add_argument("symbol")
@@ -177,11 +186,15 @@ def main() -> None:
         if args.include_flair is not None:
             kinds += hermes_api.expand_kinds(args.include_flair.split(","))
         report = hermes_api.trend(conn, days=args.days, top_n=args.top,
-                                  stale_days=args.stale_days, kinds=kinds)
+                                  stale_days=args.stale_days, kinds=kinds,
+                                  entity_mode="best" if args.llm else "regex",
+                                  with_sentiment=args.llm)
         print(trend_block(report))
     elif args.cmd == "symbol":
-        print(symbol_block(hermes_api.symbol_detail(conn, args.symbol, days=args.days),
-                           limit=args.limit))
+        print(symbol_block(
+            hermes_api.symbol_detail(conn, args.symbol, days=args.days,
+                                     with_sentiment=True),
+            limit=args.limit))
 
 
 if __name__ == "__main__":
