@@ -1,0 +1,25 @@
+# Weekly retention pass: archive closed threads to gzipped JSON, null their
+# raw_json, VACUUM. Add --prune-bodies N to the ExecStart (or a drop-in) once
+# the DB is big enough to warrant dropping old comment text.
+
+[Unit]
+Description=Hermes WSB digger retention + VACUUM
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes-digger
+EnvironmentFile=-/opt/hermes-digger/.env
+ExecStart=/opt/hermes-digger/.venv/bin/python /opt/hermes-digger/maintain.py
+Nice=15
+TimeoutStartSec=1800
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/hermes-digger
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

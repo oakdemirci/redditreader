@@ -36,6 +36,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import extract
 import store
@@ -109,7 +110,8 @@ def release_lock() -> None:
 #  one slice                                                                   #
 # --------------------------------------------------------------------------- #
 def process_slice(conn, arc: Archive, subreddit: str, kinds: set[str],
-                  start: int, end: int, log, known_symbols: set[str] | None = None) -> str:
+                  start: int, end: int, log, known_symbols: set[str] | None = None,
+                  archive_dir=None) -> str:
     run_id = store.start_run(conn, _iso(start), _iso(end))
     discovered = 0
     fetched_threads = 0
@@ -156,12 +158,17 @@ def process_slice(conn, arc: Archive, subreddit: str, kinds: set[str],
             if scanned:
                 log(f"extracted entities from {scanned} new comment(s)")
 
-        # 4. retire threads that are old and quiet
+        # 4. retire threads that are old and quiet, then snapshot + shrink them
         closed = store.close_stale_threads(
             conn, end, max_age_hours=CLOSE_MAX_AGE_HOURS, quiet_hours=CLOSE_QUIET_HOURS
         )
         for cid in closed:
             log(f"closed id={cid}")
+        if archive_dir is not None:
+            for tid in store.pending_archive(conn):
+                path = store.archive_thread(conn, tid, archive_dir)
+                if path:
+                    log(f"archived id={tid} -> {path}")
 
         status = "partial" if failures else "ok"
         store.finish_run(conn, run_id, status, n_threads=fetched_threads,
@@ -185,7 +192,7 @@ def process_slice(conn, arc: Archive, subreddit: str, kinds: set[str],
 def run(conn, arc: Archive, subreddit: str, kinds: set[str], *,
         now: datetime | None = None, catch_up: bool = False,
         max_hours: int | None = None, since: int | None = None,
-        backfill_days: int | None = None, log=print) -> int:
+        backfill_days: int | None = None, archive_dir=None, log=print) -> int:
     now = now or datetime.now(timezone.utc)
     target = int(_floor_hour(now).timestamp())
     known = tickers.load_known_stock_symbols()
@@ -196,7 +203,8 @@ def run(conn, arc: Archive, subreddit: str, kinds: set[str], *,
         # so the hourly timer picks up cleanly from here.
         start = target - backfill_days * 86400
         log(f"backfill {_iso(start)}..{_iso(target)} ({backfill_days}d)")
-        process_slice(conn, arc, subreddit, kinds, start, target, log, known_symbols=known)
+        process_slice(conn, arc, subreddit, kinds, start, target, log,
+                      known_symbols=known, archive_dir=archive_dir)
         return 1
 
     start = since if since is not None else compute_start(conn, now)
@@ -215,7 +223,7 @@ def run(conn, arc: Archive, subreddit: str, kinds: set[str], *,
 
     for slice_start, slice_end in pending:
         process_slice(conn, arc, subreddit, kinds, slice_start, slice_end, log,
-                      known_symbols=known)
+                      known_symbols=known, archive_dir=archive_dir)
     return len(pending)
 
 
@@ -246,6 +254,11 @@ def main() -> None:
     parser.add_argument("--backfill", type=int, default=None, metavar="DAYS",
                         help="one-shot: sweep the last DAYS days in a single pass, then "
                              "leave the watermarks at now for the hourly timer")
+    parser.add_argument("--archive-dir",
+                        default=os.environ.get("HERMES_ARCHIVE_DIR"),
+                        help="gzipped JSON snapshot dir for closed threads "
+                             "(default: <db dir>/archive; also HERMES_ARCHIVE_DIR). "
+                             "'none' disables archival")
     parser.add_argument("--min-interval", type=float, default=2.0, metavar="SEC")
     parser.add_argument("--ignore-lock", action="store_true",
                         help="run even if digger.lock is held (use only when sure)")
@@ -260,9 +273,16 @@ def main() -> None:
         conn = store.connect(args.db)
         arc = Archive(min_interval=args.min_interval, verbose=False)
         since = parse_time(args.since) if args.since else None
+
+        archive_dir = args.archive_dir
+        if archive_dir is None:
+            archive_dir = str(Path(args.db).resolve().parent / "archive")
+        elif archive_dir.lower() == "none":
+            archive_dir = None
+
         n = run(conn, arc, args.subreddit, parse_kinds(args.kinds),
                 catch_up=args.catch_up, max_hours=args.max_hours, since=since,
-                backfill_days=args.backfill, log=log)
+                backfill_days=args.backfill, archive_dir=archive_dir, log=log)
         log(f"done ({n} slice(s))")
         conn.close()
     finally:

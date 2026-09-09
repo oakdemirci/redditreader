@@ -55,8 +55,11 @@ Arctic Shift API ──> digger.py (hourly, systemd timer)
 | JSON (`.json.gz`) | secondary | Per-thread cold archive for reprocessing / portability. Not queried. |
 | Markdown  | not storage  | Render target for chat replies (thread digests, `SYM` table). |
 
-Projected size: structured columns + body ≈ **5–6 GB/year**; gzipped archive ≈
-**1.5–2 GB/year**. Fits the 35 GB free on `/dev/sda1`. Revisit retention at 12 months.
+Measured size (Phase 5, megathreads only): **~1.1 GB/year** live DB (weekly
+archival nulls `raw_json` once threads close) + **~0.5 GB/year** gzipped archive +
+up to ~1.5 GB of rolling backups. ~3 GB in year one, comfortable on the 35 GB
+`/dev/sda1`. Without the archival step it would be ~11.5 GB/year. Full curve in
+`docs/DEPLOY.md`.
 
 ## Delta / windowing (requirement 3)
 
@@ -254,7 +257,31 @@ Include a disk-usage check and a `systemctl status` / last-run smoke test.
 firing timer, a growing DB, working `trend.py` / `hermes_api` queries over SSH,
 and a tested backup+restore.
 
-### Phase 5 — Retention + digest rendering
+### Phase 5 — Retention + digest rendering  ✅ done (2026-09-10)
+
+Shipped: `render.py` (thread digest / trend block / symbol block), `maintain.py`
++ `systemd/hermes-digger-maintenance.{service,timer}` (weekly Sun 04:15), store
+retention helpers, schema v3 -> v4 (`threads.archived_at`).
+
+* On thread close the digger snapshots to `archive/YYYY/MM/*.json.gz`
+  (`--archive-dir` / `HERMES_ARCHIVE_DIR`, default `<db dir>/archive`) and nulls
+  the comments' `raw_json`. `maintain.py` does the same for any straggler +
+  `VACUUM` + optional `--prune-bodies DAYS`.
+* **Measured (busy day, 11,307 comments): 39.8 MB with raw_json -> 3.7 MB after
+  archival+VACUUM (11x), gz snapshot 1.8 MB.** Annualised ~1.1 GB/yr live DB +
+  ~0.5 GB/yr archive; without archival it's ~11.5 GB/yr. Full curve in
+  `docs/DEPLOY.md`.
+* `render.py` targets Telegram: the SYM table goes in a code fence (no Markdown
+  tables there), the thread digest is depth/score/`--top`-limited bullets with
+  `_(N more)_` collapse (or `<details>` with `--details`). `store.get_tree`
+  reconstructs fine from columns after `raw_json` is gone.
+* `store.write_archive` is now the single gz writer (ingest's `--export-json`
+  delegates to it).
+
+Acceptance met: gz round-trips to the same id set as a live `get_tree`; DB
+shrank 11x after a prune; digests render within Telegram width.
+
+Original spec:
 
 Add `render.py`: Markdown renderers for (a) a single thread as a collapsible
 comment-tree digest, (b) the trend table, (c) a symbol report. Add retention to

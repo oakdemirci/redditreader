@@ -1,0 +1,12 @@
+# Weekly, Sunday 04:15 -- after the daily backup, clear of the hourly digger.
+
+[Unit]
+Description=Weekly Hermes WSB digger retention pass
+
+[Timer]
+OnCalendar=Sun *-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

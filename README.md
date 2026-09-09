@@ -19,12 +19,15 @@ field, hourly delta ingest into `hermes.db` (SQLite).
     python extract.py                          # regex ticker/coin -> entities
     python trend.py                            # same report, now over hermes.db
     python report.py --symbol AAPL
+    python render.py thread 1wbh9od            # markdown digest of a comment tree
+    python maintain.py                         # archive closed threads + VACUUM
     python ingest.py --stats                   # watermarks, last run
 
-Modules: `arctic.py` (client), `store.py` (schema + tree reconstruction),
-`ingest.py` (discovery + CLI), `digger.py` (scheduled job), `wsbcal.py`
-(trading-day calendar), `extract.py` (regex mentions), `hermes_api.py` (read-only
-query layer behind `trend.py`/`report.py`). `wsb_tree.py` is a thin wrapper that
+Modules: `arctic.py` (client), `store.py` (schema + tree reconstruction +
+retention), `ingest.py` (discovery + CLI), `digger.py` (scheduled job),
+`wsbcal.py` (trading-day calendar), `extract.py` (regex mentions), `hermes_api.py`
+(read-only query layer behind `trend.py`/`report.py`), `render.py` (markdown for
+chat), `maintain.py` (retention + VACUUM). `wsb_tree.py` is a thin wrapper that
 also writes one JSON file per thread. `python tests/test_hermes_api.py` runs the
 fixture tests.
 

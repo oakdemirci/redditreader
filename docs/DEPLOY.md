@@ -118,6 +118,8 @@ restic ... forget --keep-daily 14 --keep-weekly 8 --prune
 | update code | `git -C /opt/hermes-digger pull && sudo bash scripts/install.sh` |
 | widen coverage | edit `HERMES_KINDS` in `.env`, then `systemctl restart hermes-digger.timer` |
 | re-extract mentions | `sudo -u hermes .venv/bin/python extract.py --rescan` |
+| retention now | `sudo -u hermes .venv/bin/python maintain.py` |
+| DB size accounting | `sudo -u hermes .venv/bin/python maintain.py --report` |
 
 ### Troubleshooting
 
@@ -132,6 +134,37 @@ restic ... forget --keep-daily 14 --keep-weekly 8 --prune
   clock (`timedatectl`) is on UTC and correct.
 * **disk filling** -- `du -sh /opt/hermes-digger/*`; prune backups
   (`BACKUP_KEEP`), and see the retention work in Phase 5.
+
+### Storage & retention
+
+Measured on a busy day (2026-09-09, megathreads only): **11,307 comments**,
+11,545 entity rows.
+
+| state | size | per comment |
+|---|---|---|
+| DB with `raw_json` (fresh ingest) | 39.8 MB | ~3.5 KB |
+| DB after archival (`raw_json` nulled) + `VACUUM` | 3.7 MB | ~330 B |
+| gzipped JSON snapshot for the day | 1.8 MB | ~160 B |
+
+`hermes-digger-maintenance.timer` (weekly, Sun 04:15) runs `maintain.py`:
+snapshots every closed thread to `archive/YYYY/MM/*.json.gz`, nulls its comments'
+`raw_json`, then `VACUUM`s. Threads close ~48 h after posting, so at most ~3 days
+of comments sit at the fat size at once.
+
+Annualised, megathreads only (~9k comments/day):
+
+* **live DB** ≈ 1.1 GB/year + a ~100 MB working head
+* **gz archive** ≈ 0.5 GB/year
+* **backups** (7 daily gzips of the DB) ≈ up to ~1.5 GB once the DB is ~1 GB
+
+~3 GB in year one; 2-3x that if `HERMES_KINDS` is widened to flaired posts.
+Comfortable on the 35 GB box. **Without the weekly archival it would be
+~11.5 GB/year of DB alone** -- so keep that timer enabled.
+
+`maintain.py --prune-bodies DAYS` is the extra lever: it also nulls the comment
+*text* for extracted comments older than DAYS (trend counts and entity rows
+survive; `report.py --symbol` loses the quotes). Add it to the maintenance
+unit's ExecStart only if the box actually gets tight.
 
 ### Relation to the old RSS pipeline
 

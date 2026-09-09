@@ -24,11 +24,10 @@ digger (Phase 2) adds "megathreads from the last ~48h that are still open".
 from __future__ import annotations
 
 import argparse
-import gzip
 import json
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import store
@@ -96,18 +95,7 @@ def _iso(epoch: int) -> str:
     return datetime.fromtimestamp(epoch, timezone.utc).replace(microsecond=0).isoformat()
 
 
-def export_json(tree: dict, out_dir: Path) -> Path:
-    """Write a thread's full tree as gzipped JSON under ``<out_dir>/YYYY/MM/``."""
-    meta = tree["meta"]
-    created = meta.get("created_utc") or 0
-    when = datetime.fromtimestamp(created, timezone.utc) if created else datetime.now(timezone.utc)
-    slug = meta["kind"].replace("flair:", "").replace(":", "-").replace(" ", "-")
-    folder = out_dir / f"{when:%Y}" / f"{when:%m}"
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{meta['subreddit']}_{when:%Y%m%d}_{slug}_{meta['thread_id']}.json.gz"
-    with gzip.open(path, "wt", encoding="utf-8") as fh:
-        json.dump(tree, fh, ensure_ascii=False, indent=2)
-    return path
+export_json = store.write_archive  # kept for callers; the writer lives in store now
 
 
 # --------------------------------------------------------------------------- #

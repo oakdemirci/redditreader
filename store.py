@@ -19,15 +19,16 @@ fields (score, body, edited) and inserts nothing new.
 
 from __future__ import annotations
 
+import gzip
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import wsbcal
 from arctic import bare_id
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS threads (
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS threads (
     is_open      INTEGER NOT NULL DEFAULT 1,-- 0 once the thread is old and quiet
     comments_through INTEGER,               -- epoch; comments confirmed fetched up to here
     trading_day  TEXT,                      -- YYYY-MM-DD the reports count this thread under
+    archived_at  TEXT,                      -- ISO-8601 UTC; set once the gz snapshot is written
     post_json    TEXT NOT NULL              -- full submission object
 );
 CREATE INDEX IF NOT EXISTS threads_trading_day ON threads(trading_day);
@@ -180,6 +182,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
             # entities is unpopulated before Phase 3, so a clean drop is safe;
             # SCHEMA recreates it right after this.
             conn.execute("DROP TABLE entities")
+
+    if "archived_at" not in tcols:  # v3 -> v4
+        conn.execute("ALTER TABLE threads ADD COLUMN archived_at TEXT")
     conn.commit()
 
 
@@ -432,6 +437,97 @@ def close_stale_threads(conn: sqlite3.Connection, now_epoch: int, *,
     return ids
 
 
+# --- retention (Phase 5) ------------------------------------------------- #
+def write_archive(tree: dict, out_dir: Path) -> Path:
+    """Write a thread tree (from :func:`get_tree`) as gzipped JSON under
+    ``out_dir/YYYY/MM/``. Shared by the ingest ``--export-json`` path and the
+    digger's on-close archival."""
+    meta = tree["meta"]
+    created = meta.get("created_utc") or 0
+    when = (datetime.fromtimestamp(created, timezone.utc) if created
+            else datetime.now(timezone.utc))
+    slug = meta["kind"].replace("flair:", "").replace(":", "-").replace(" ", "-")
+    folder = Path(out_dir) / f"{when:%Y}" / f"{when:%m}"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{meta['subreddit']}_{when:%Y%m%d}_{slug}_{meta['thread_id']}.json.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        json.dump(tree, fh, ensure_ascii=False, indent=2)
+    return path
+
+
+def archive_thread(conn: sqlite3.Connection, thread_id: str,
+                   out_dir: str | Path) -> Path | None:
+    """Snapshot a thread to gzipped JSON, then null its comments' ``raw_json`` to
+    reclaim space. Idempotent -- returns None if already archived or unknown."""
+    tid = bare_id(thread_id)
+    row = conn.execute(
+        "SELECT archived_at FROM threads WHERE id = ?", (tid,)
+    ).fetchone()
+    if row is None or row["archived_at"]:
+        return None
+    path = write_archive(get_tree(conn, tid), Path(out_dir))
+    conn.execute("UPDATE comments SET raw_json = NULL WHERE thread_id = ?", (tid,))
+    conn.execute("UPDATE threads SET archived_at = ? WHERE id = ?", (_now_iso(), tid))
+    conn.commit()
+    return path
+
+
+def pending_archive(conn: sqlite3.Connection) -> list[str]:
+    """Closed threads that still need a snapshot."""
+    return [
+        r[0] for r in conn.execute(
+            "SELECT id FROM threads WHERE is_open = 0 AND archived_at IS NULL"
+        )
+    ]
+
+
+def prune_bodies(conn: sqlite3.Connection, older_than_days: int) -> int:
+    """Null ``body`` (and ``raw_json``) for comments older than N days that have
+    already been through regex extraction -- trends and entity counts survive,
+    the drill-down text does not. Returns rows affected."""
+    cutoff = int((datetime.now(timezone.utc) - timedelta(days=older_than_days)).timestamp())
+    cur = conn.execute(
+        """
+        UPDATE comments SET body = NULL, raw_json = NULL
+        WHERE created_utc < ? AND (body IS NOT NULL OR raw_json IS NOT NULL)
+          AND EXISTS (SELECT 1 FROM entities e
+                      WHERE e.comment_id = comments.id AND e.source = 'regex')
+        """,
+        (cutoff,),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def vacuum(conn: sqlite3.Connection) -> None:
+    """Reclaim free pages. Needs exclusive access and ~db-size free disk."""
+    conn.execute("VACUUM")
+
+
+def db_size_report(conn: sqlite3.Connection) -> dict:
+    """Rough on-disk accounting to sanity-check retention."""
+    page_count, page_size = conn.execute(
+        "SELECT page_count, page_size FROM pragma_page_count(), pragma_page_size()"
+    ).fetchone()
+    n_comments = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+    with_raw = conn.execute(
+        "SELECT COUNT(*) FROM comments WHERE raw_json IS NOT NULL"
+    ).fetchone()[0]
+    no_body = conn.execute(
+        "SELECT COUNT(*) FROM comments WHERE body IS NULL"
+    ).fetchone()[0]
+    archived = conn.execute(
+        "SELECT COUNT(*) FROM threads WHERE archived_at IS NOT NULL"
+    ).fetchone()[0]
+    return {
+        "bytes": page_count * page_size,
+        "comments": n_comments,
+        "comments_with_raw_json": with_raw,
+        "comments_body_pruned": no_body,
+        "threads_archived": archived,
+    }
+
+
 # --------------------------------------------------------------------------- #
 #  reads                                                                       #
 # --------------------------------------------------------------------------- #
@@ -514,7 +610,9 @@ def get_tree(conn: sqlite3.Connection, thread_id: str) -> dict:
             "title": thread["title"],
             "permalink": "https://www.reddit.com" + permalink,
             "created_utc": thread["created_utc"],
+            "trading_day": thread["trading_day"],
             "is_open": bool(thread["is_open"]),
+            "archived_at": thread["archived_at"],
             "first_seen": thread["first_seen"],
             "last_polled": thread["last_polled"],
             "stored_comments": len(rows),

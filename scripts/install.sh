@@ -42,7 +42,8 @@ chmod +x "$APP_DIR"/scripts/*.sh
 
 echo "==> systemd units"
 for unit in hermes-digger.service hermes-digger.timer \
-            hermes-digger-backup.service hermes-digger-backup.timer; do
+            hermes-digger-backup.service hermes-digger-backup.timer \
+            hermes-digger-maintenance.service hermes-digger-maintenance.timer; do
     install -m644 "$APP_DIR/systemd/$unit" /etc/systemd/system/
 done
 install -m644 "$APP_DIR/systemd/logrotate-hermes-digger" /etc/logrotate.d/hermes-digger
@@ -51,7 +52,8 @@ mkdir -p /etc/systemd/journald.conf.d
 printf '[Journal]\nSystemMaxUse=500M\n' > /etc/systemd/journald.conf.d/hermes-digger.conf
 systemctl restart systemd-journald
 systemctl daemon-reload
-systemctl enable --now hermes-digger.timer hermes-digger-backup.timer
+systemctl enable --now hermes-digger.timer hermes-digger-backup.timer \
+    hermes-digger-maintenance.timer
 
 cat <<EOF
 
