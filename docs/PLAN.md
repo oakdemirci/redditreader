@@ -75,7 +75,24 @@ Projected size: structured columns + body ≈ **5–6 GB/year**; gzipped archive
 Self-contained; do them roughly in order. Dependency chain: 1 → 2 → 3 → 4, then
 5–7 in any order, then 8 last. Each phase heading below is the prompt to start it.
 
-### Phase 1 — SQLite store + ingest refactor
+### Phase 1 — SQLite store + ingest refactor  ✅ done (2026-09-10)
+
+Shipped as `arctic.py` + `store.py` + `ingest.py`, `wsb_tree.py` reduced to a
+wrapper. Notes for later phases:
+
+* `store.get_tree()` reconstructs the tree in Python (not a recursive CTE) --
+  simpler and it already matches the old output shape exactly. Revisit if Phase 8
+  needs SQL-side subtree/depth slicing.
+* `comments/search` **rejects `after` + `before` together on a `link_id` query**
+  (422 with a misleading "slow down" body). `arctic.Archive.comments()` therefore
+  sends only `after` and applies `before` client-side. Verified: a 1-hour slice
+  of a busy daily thread returned exactly the in-window comments (~1500).
+* A busy WSB daily runs ~1500 comments/hour -> ~15 pages/hour/thread. Fine.
+* `store.last_successful_end()` counts both `ok` and `partial` runs. **Phase 2
+  must decide partial-run semantics** (a per-thread failure currently advances
+  the watermark past comments it never fetched).
+
+Original spec:
 
 Refactor the Arctic Shift ingest into a persistent SQLite store. Split
 `wsb_tree.py` into flat modules matching this repo's style (root-level `.py`
