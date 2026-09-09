@@ -50,6 +50,10 @@ def main() -> None:
                    help="also count flaired standalone posts (default: gain,loss,discussion)")
     p.add_argument("--db", default=str(store.DEFAULT_DB))
     p.add_argument("--markdown", action="store_true", help="render a markdown table")
+    p.add_argument("--entity-mode", choices=hermes_api.ENTITY_MODES, default="regex",
+                   help="which mention tier to count (default: regex)")
+    p.add_argument("--llm", action="store_true",
+                   help="shorthand for --entity-mode best (LLM disambiguation)")
     args = p.parse_args()
 
     kinds = list(hermes_api.MEGA_KINDS)
@@ -60,7 +64,7 @@ def main() -> None:
     report = hermes_api.trend(
         conn, days=args.days, min_total=args.min_total, recent_hours=args.recent_hours,
         stale_days=args.stale_days, top_n=args.top, cashtags_only=args.cashtags_only,
-        kinds=kinds,
+        kinds=kinds, entity_mode="best" if args.llm else args.entity_mode,
     )
     if not report.shown_days:
         print("No thread data in this window yet.")

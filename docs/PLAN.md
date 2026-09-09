@@ -293,7 +293,37 @@ growth curve with real numbers from Phase 4 data.
 **Acceptance:** archive round-trips (gz → same tree); DB size drops measurably
 after a prune; rendered digests are readable in a Telegram message-width preview.
 
-### Phase 6 — LLM entity extraction (DeepSeek) — requirement 5.1
+### Phase 6 — LLM entity extraction (DeepSeek) — requirement 5.1  ✅ done (2026-09-10)
+
+Shipped: `llm.py` (shared client), `enrich_entities.py`, schema v4->v5
+(`llm_calls` ledger + `llm_cache`), `hermes_api` `entity_mode` (regex/llm/best),
+`tools/eval_entities.py` + a 40-row seed label set, `tests/test_enrich_entities.py`.
+
+* `llm.py`: DeepSeek via plain `requests` (no `openai` dep), JSON mode, retry,
+  per-call `llm_calls` logging with token+cost, daily USD cap
+  (`HERMES_LLM_DAILY_USD`), per-input `llm_cache` keyed on body-hash + prompt
+  version. `available()` is False with no key -> the whole pass is a no-op, so
+  the digger stays keyless-safe.
+* `enrich_entities.py`: pre-filter (cashtag OR finance keyword OR regex
+  candidate), batch ~30, `PROMPT_VER = "entities-v1"`. Writes `source='llm'`,
+  `tier='llm'`, with a `__none__` sentinel for comments it scanned and cleared
+  (lets `best` mode veto a bad regex bareword). Wired into `digger.py` after the
+  regex pass; `--no-llm` to skip.
+* `entity_mode`: `regex` (default, matches pre-Phase-6 + the fixture tests),
+  `llm`, `best` (llm where the comment was scanned, else regex). `$` cashtag
+  confirmation is always computed from the regex tier regardless of mode.
+  `trend.py --llm` / `report.py --llm` = `best`.
+* **Eval (regex tier, 40-row seed): precision 1.00, recall 0.47, F1 0.64.** Every
+  miss is a lowercase ticker ("meta", "spy") or a name ("Palantir", "bitcoin",
+  "TSMC") -- exactly what the LLM tier is for. `regex+llm` mode needs a key to
+  run; harness ready. **Estimated cost ~$0.02 per 1k comments sent (~35% pass
+  rate) -> ~$2/month** for megathreads; `llm_calls` records the real numbers.
+* Cache verified: re-run at the same `prompt_ver` makes zero API calls.
+
+Acceptance: precision/recall harness + seed set (grow to ~200 and run with a key
+for the full check); cost estimated + ledgered; zero-call re-run confirmed.
+
+Original spec:
 
 Build `enrich_entities.py` + shared LLM infra (`llm.py`: DeepSeek client via its
 OpenAI-compatible endpoint, JSON-mode, batching, retry, `llm_calls` cost/token

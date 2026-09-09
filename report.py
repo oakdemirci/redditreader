@@ -37,19 +37,24 @@ def main() -> None:
                    default=None, metavar="KINDS",
                    help="also count flaired standalone posts (default: gain,loss,discussion)")
     p.add_argument("--db", default=str(store.DEFAULT_DB))
+    p.add_argument("--entity-mode", choices=hermes_api.ENTITY_MODES, default="regex")
+    p.add_argument("--llm", action="store_true", help="shorthand for --entity-mode best")
     args = p.parse_args()
 
+    mode = "best" if args.llm else args.entity_mode
     conn = store.connect(args.db)
 
     if args.symbol:
-        print(hermes_api.symbol_detail(conn, args.symbol, days=args.days).to_text())
+        print(hermes_api.symbol_detail(conn, args.symbol, days=args.days,
+                                       entity_mode=mode).to_text())
         return
 
     kinds = list(hermes_api.MEGA_KINDS)
     if args.include_flair is not None:
         kinds += hermes_api.expand_kinds(args.include_flair.split(","))
 
-    report = hermes_api.day_report(conn, args.date, kinds=kinds, by_thread=args.by_thread)
+    report = hermes_api.day_report(conn, args.date, kinds=kinds,
+                                   by_thread=args.by_thread, entity_mode=mode)
     if not report.threads:
         recent = [r["trading_day"] for r in conn.execute(
             "SELECT DISTINCT trading_day FROM threads ORDER BY trading_day DESC LIMIT 5"

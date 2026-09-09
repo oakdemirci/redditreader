@@ -30,8 +30,13 @@ user; builds `.venv`; copies `.env.example` -> `.env`; installs and enables
 `hermes-digger.timer` (hourly at :05) and `hermes-digger-backup.timer` (daily
 03:30); caps journald at 500 MB.
 
-Review `/opt/hermes-digger/.env` -- especially `HERMES_KINDS` (megathreads only
-by default; add `gain,loss,discussion` to also track flaired standalone posts).
+Review `/opt/hermes-digger/.env`:
+* `HERMES_KINDS` -- megathreads only by default; add `gain,loss,discussion` to
+  also track flaired standalone posts.
+* `DEEPSEEK_API_KEY` -- optional. Empty = keyless (regex ticker extraction only).
+  Set it to turn on the LLM disambiguation pass (`enrich_entities.py`), capped at
+  `HERMES_LLM_DAILY_USD` (default $1/day; real cost is ~$2/month for megathreads).
+  Then `trend.py --llm` / `report.py --llm` count the blended tier.
 
 ## 3. Backfill initial history
 
@@ -120,6 +125,8 @@ restic ... forget --keep-daily 14 --keep-weekly 8 --prune
 | re-extract mentions | `sudo -u hermes .venv/bin/python extract.py --rescan` |
 | retention now | `sudo -u hermes .venv/bin/python maintain.py` |
 | DB size accounting | `sudo -u hermes .venv/bin/python maintain.py --report` |
+| LLM spend / status | `sudo -u hermes .venv/bin/python enrich_entities.py --stats` |
+| LLM extraction now | `sudo -u hermes .venv/bin/python enrich_entities.py` |
 
 ### Troubleshooting
 

@@ -28,7 +28,7 @@ from pathlib import Path
 import wsbcal
 from arctic import bare_id
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS threads (
@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS entities (
 );
 CREATE INDEX IF NOT EXISTS entities_symbol ON entities(symbol);
 CREATE INDEX IF NOT EXISTS entities_comment ON entities(comment_id);
+CREATE INDEX IF NOT EXISTS entities_source ON entities(source, comment_id);
 
 -- Populated by Phase 7 (LLM sentiment). Shape frozen now.
 CREATE TABLE IF NOT EXISTS sentiment (
@@ -118,6 +119,33 @@ CREATE INDEX IF NOT EXISTS sentiment_symbol ON sentiment(symbol);
 CREATE UNIQUE INDEX IF NOT EXISTS sentiment_uniq ON sentiment(
     scope, symbol, IFNULL(comment_id, ''), IFNULL(thread_id, ''),
     IFNULL(window_start, ''), IFNULL(prompt_ver, '')
+);
+
+-- LLM enrichment bookkeeping (Phases 6-7). `llm_calls` is the cost/token ledger;
+-- `llm_cache` keys a per-input response on the prompt version so a re-run at the
+-- same version makes no API calls.
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT NOT NULL,
+    task        TEXT NOT NULL,             -- entities | sentiment
+    model       TEXT NOT NULL,
+    prompt_ver  TEXT,
+    n_items     INTEGER,
+    tokens_in   INTEGER,
+    tokens_out  INTEGER,
+    cost_usd    REAL,
+    ok          INTEGER NOT NULL,
+    error       TEXT
+);
+CREATE INDEX IF NOT EXISTS llm_calls_day ON llm_calls(created_at);
+
+CREATE TABLE IF NOT EXISTS llm_cache (
+    input_hash    TEXT NOT NULL,
+    prompt_ver    TEXT NOT NULL,
+    task          TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (input_hash, prompt_ver, task)
 );
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);

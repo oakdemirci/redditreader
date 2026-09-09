@@ -24,6 +24,24 @@ import store
 
 MEGA_KINDS: tuple[str, ...] = ("daily", "moves", "weekend")
 
+ENTITY_MODES = ("regex", "llm", "best")
+
+
+def _entity_where(mode: str) -> str:
+    """SQL predicate on alias ``e`` selecting which entity tier(s) to count.
+
+    * ``regex`` -- the cheap first pass only (default; matches pre-Phase-6).
+    * ``llm``   -- the DeepSeek tier only.
+    * ``best``  -- LLM rows where the comment was LLM-scanned (so the LLM can
+      veto a bad regex bareword), else the regex rows.
+    """
+    if mode == "llm":
+        return "e.source = 'llm'"
+    if mode == "best":
+        return ("(e.source = 'llm' OR (e.source = 'regex' AND e.comment_id NOT IN "
+                "(SELECT comment_id FROM entities WHERE source = 'llm')))")
+    return "e.source = 'regex'"
+
 # A full live trading day runs into the thousands of comments; well below that is
 # a partial sample (a backfill, or a day still in progress early on).
 PARTIAL_COMMENT_THRESHOLD = 800
@@ -154,12 +172,14 @@ def _sov(mentions: int, comments: int) -> float:
 
 def trend(db, *, days: int = 5, min_total: int = 2, recent_hours: float = 4.0,
           stale_days: int = 2, top_n: int | None = None,
-          cashtags_only: bool = False, kinds=MEGA_KINDS) -> TrendReport:
+          cashtags_only: bool = False, kinds=MEGA_KINDS,
+          entity_mode: str = "regex") -> TrendReport:
     conn = _connect(db)
     kinds = list(kinds)
     window = _window_days(days)
     start = window[0]
     kph = _placeholders(kinds)
+    ent = _entity_where(entity_mode)
 
     # comments per trading day (+ which thread kinds contributed), merged
     counts: dict[str, int] = {}
@@ -174,22 +194,33 @@ def trend(db, *, days: int = 5, min_total: int = 2, recent_hours: float = 4.0,
         counts[day] = n
         kinds_by_day[day] = "+".join(sorted((klist or "").split(",")))
 
-    # mentions per (day, symbol) and cashtag totals
+    # mentions per (day, symbol), under the chosen entity tier
     by_symbol: dict[str, dict[str, int]] = defaultdict(dict)
-    cashtags: dict[str, int] = defaultdict(int)
-    for day, symbol, mentions, ct in conn.execute(
-        f"""SELECT t.trading_day, e.symbol,
-                   COUNT(DISTINCT e.comment_id),
-                   SUM(CASE WHEN e.tier = 'cashtag' THEN 1 ELSE 0 END)
+    for day, symbol, mentions in conn.execute(
+        f"""SELECT t.trading_day, e.symbol, COUNT(DISTINCT e.comment_id)
             FROM entities e
             JOIN comments c ON c.id = e.comment_id
             JOIN threads t ON t.id = c.thread_id
             WHERE t.trading_day >= ? AND e.symbol != '__none__' AND t.kind IN ({kph})
+              AND {ent}
             GROUP BY t.trading_day, e.symbol""",
         [start, *kinds],
     ):
         by_symbol[symbol][day] = mentions
-        cashtags[symbol] += ct or 0
+
+    # cashtag confirmation is always a regex-tier signal, independent of mode
+    cashtags: dict[str, int] = defaultdict(int)
+    for symbol, ct in conn.execute(
+        f"""SELECT e.symbol, COUNT(DISTINCT e.comment_id)
+            FROM entities e
+            JOIN comments c ON c.id = e.comment_id
+            JOIN threads t ON t.id = c.thread_id
+            WHERE t.trading_day >= ? AND t.kind IN ({kph})
+              AND e.source = 'regex' AND e.tier = 'cashtag'
+            GROUP BY e.symbol""",
+        [start, *kinds],
+    ):
+        cashtags[symbol] = ct
 
     recent_cutoff = int(datetime.now(timezone.utc).timestamp() - recent_hours * 3600)
     recent = dict(conn.execute(
@@ -198,6 +229,7 @@ def trend(db, *, days: int = 5, min_total: int = 2, recent_hours: float = 4.0,
             JOIN comments c ON c.id = e.comment_id
             JOIN threads t ON t.id = c.thread_id
             WHERE c.created_utc >= ? AND e.symbol != '__none__' AND t.kind IN ({kph})
+              AND {ent}
             GROUP BY e.symbol""",
         [recent_cutoff, *kinds],
     ))
@@ -292,14 +324,15 @@ class SymbolDetail:
         return "\n".join(L)
 
 
-def symbol_detail(db, symbol: str, *, days: int | None = None) -> SymbolDetail:
+def symbol_detail(db, symbol: str, *, days: int | None = None,
+                  entity_mode: str = "regex") -> SymbolDetail:
     conn = _connect(db)
     symbol = symbol.upper()
-    sql = ["""SELECT t.trading_day, t.kind, e.tier, c.author, c.created_utc, c.body
+    sql = [f"""SELECT DISTINCT t.trading_day, t.kind, e.tier, c.author, c.created_utc, c.body
               FROM entities e
               JOIN comments c ON c.id = e.comment_id
               JOIN threads t ON t.id = c.thread_id
-              WHERE e.symbol = ?"""]
+              WHERE e.symbol = ? AND {_entity_where(entity_mode)}"""]
     params: list = [symbol]
     if days:
         cutoff = (clock.market_today() - timedelta(days=days - 1)).isoformat()
@@ -342,10 +375,12 @@ class DayReport:
         return "\n".join(L)
 
 
-def day_report(db, day: str, *, kinds=MEGA_KINDS, by_thread: bool = False) -> DayReport:
+def day_report(db, day: str, *, kinds=MEGA_KINDS, by_thread: bool = False,
+               entity_mode: str = "regex") -> DayReport:
     conn = _connect(db)
     kinds = list(kinds)
     kph = _placeholders(kinds)
+    ent = _entity_where(entity_mode)
     threads = [
         (r["kind"], r["title"]) for r in conn.execute(
             f"SELECT kind, title FROM threads WHERE trading_day = ? AND kind IN ({kph}) "
@@ -361,6 +396,7 @@ def day_report(db, day: str, *, kinds=MEGA_KINDS, by_thread: bool = False) -> Da
             JOIN comments c ON c.id = e.comment_id
             JOIN threads t ON t.id = c.thread_id
             WHERE t.trading_day = ? AND e.symbol != '__none__' AND t.kind IN ({kph})
+              AND {ent}
             GROUP BY {group}
             ORDER BY mentions DESC, e.symbol ASC""",
         [day, *kinds],

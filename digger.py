@@ -38,7 +38,9 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import enrich_entities
 import extract
+import llm
 import store
 import tickers
 from arctic import Archive, ArchiveError
@@ -111,7 +113,7 @@ def release_lock() -> None:
 # --------------------------------------------------------------------------- #
 def process_slice(conn, arc: Archive, subreddit: str, kinds: set[str],
                   start: int, end: int, log, known_symbols: set[str] | None = None,
-                  archive_dir=None) -> str:
+                  archive_dir=None, use_llm: bool = False) -> str:
     run_id = store.start_run(conn, _iso(start), _iso(end))
     discovered = 0
     fetched_threads = 0
@@ -152,11 +154,17 @@ def process_slice(conn, arc: Archive, subreddit: str, kinds: set[str],
                 log(f"thread id={t['id']} kind={t['kind']} "
                     f"fetched={len(comments)} new={inserted} upd={updated}")
 
-        # 3. regex ticker/coin extraction over the comments just added
+        # 3. regex ticker/coin extraction over the comments just added, then
+        #    (opt-in, budget-capped) the LLM disambiguation pass
         if known_symbols is not None:
             scanned = extract.extract_pending(conn, known_symbols, verbose=False)
             if scanned:
                 log(f"extracted entities from {scanned} new comment(s)")
+        if use_llm and llm.available():
+            r = enrich_entities.enrich_pending(conn, known_symbols or set(), verbose=False)
+            if r["scanned"]:
+                log(f"llm entities: {r['scanned']} scanned, {r['calls']} call(s)"
+                    + (" (budget hit)" if r["skipped_budget"] else ""))
 
         # 4. retire threads that are old and quiet, then snapshot + shrink them
         closed = store.close_stale_threads(
@@ -192,7 +200,8 @@ def process_slice(conn, arc: Archive, subreddit: str, kinds: set[str],
 def run(conn, arc: Archive, subreddit: str, kinds: set[str], *,
         now: datetime | None = None, catch_up: bool = False,
         max_hours: int | None = None, since: int | None = None,
-        backfill_days: int | None = None, archive_dir=None, log=print) -> int:
+        backfill_days: int | None = None, archive_dir=None, use_llm: bool = False,
+        log=print) -> int:
     now = now or datetime.now(timezone.utc)
     target = int(_floor_hour(now).timestamp())
     known = tickers.load_known_stock_symbols()
@@ -204,7 +213,7 @@ def run(conn, arc: Archive, subreddit: str, kinds: set[str], *,
         start = target - backfill_days * 86400
         log(f"backfill {_iso(start)}..{_iso(target)} ({backfill_days}d)")
         process_slice(conn, arc, subreddit, kinds, start, target, log,
-                      known_symbols=known, archive_dir=archive_dir)
+                      known_symbols=known, archive_dir=archive_dir, use_llm=use_llm)
         return 1
 
     start = since if since is not None else compute_start(conn, now)
@@ -223,7 +232,7 @@ def run(conn, arc: Archive, subreddit: str, kinds: set[str], *,
 
     for slice_start, slice_end in pending:
         process_slice(conn, arc, subreddit, kinds, slice_start, slice_end, log,
-                      known_symbols=known, archive_dir=archive_dir)
+                      known_symbols=known, archive_dir=archive_dir, use_llm=use_llm)
     return len(pending)
 
 
@@ -260,6 +269,8 @@ def main() -> None:
                              "(default: <db dir>/archive; also HERMES_ARCHIVE_DIR). "
                              "'none' disables archival")
     parser.add_argument("--min-interval", type=float, default=2.0, metavar="SEC")
+    parser.add_argument("--no-llm", action="store_true",
+                        help="skip the LLM entity pass even if DEEPSEEK_API_KEY is set")
     parser.add_argument("--ignore-lock", action="store_true",
                         help="run even if digger.lock is held (use only when sure)")
     args = parser.parse_args()
@@ -282,7 +293,8 @@ def main() -> None:
 
         n = run(conn, arc, args.subreddit, parse_kinds(args.kinds),
                 catch_up=args.catch_up, max_hours=args.max_hours, since=since,
-                backfill_days=args.backfill, archive_dir=archive_dir, log=log)
+                backfill_days=args.backfill, archive_dir=archive_dir,
+                use_llm=not args.no_llm, log=log)
         log(f"done ({n} slice(s))")
         conn.close()
     finally:
