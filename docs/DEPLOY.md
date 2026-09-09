@@ -1,8 +1,8 @@
-# Deploying the digger to Hetzner (Phase 4)
+# Deploying to Hetzner
 
-Interim runbook: get `digger.py` + `trend.py` running on the box so real data
-accumulates while Phases 5-8 are built. No secrets required yet -- Arctic Shift
-is keyless. The full Hermes Agent / Telegram wiring is Phase 8.
+Sections 1-6 stand up the digger + reports (Phase 4). Section 7 wires up Hermes
+Agent + Telegram (Phase 8). The digger runs fine on its own; do section 7 when
+you want to query it from a phone.
 
 Target: a small Debian/Ubuntu VM. Disk need is modest (~5-6 GB/year for the DB,
 ~2 GB/year for gzipped backups -- see `docs/PLAN.md`).
@@ -185,3 +185,84 @@ unit's ExecStart only if the box actually gets tight.
 `mydigger.py` (RSS, `wsb_comments.db`, its own cron) is independent and can keep
 running. Once this pipeline has a few full days on the box, retiring the old
 cron is the call to make (`docs/PLAN.md` open items).
+
+---
+
+## 7. Hermes Agent + Telegram (Phase 8)
+
+`mcp_server.py` is a stdio MCP server exposing the query layer as seven
+read-only tools (`get_trend`, `get_symbol`, `get_sentiment`, `search_comments`,
+`get_thread`, `list_threads`, `run_status`). Hermes Agent runs it as a
+subprocess and its own model (DeepSeek) turns tool output into chat answers.
+
+First, sanity-check the tools without Hermes:
+
+```bash
+sudo -u hermes /opt/hermes-digger/.venv/bin/python \
+    /opt/hermes-digger/mcp_server.py --selftest
+bash /opt/hermes-digger/scripts/ask-the-bot.sh      # the 4 acceptance scenarios
+```
+
+### 7a. Install Hermes Agent
+
+As the `hermes` user (it installs into `~/.hermes` with its own venv; needs
+Python 3.11, Node, ripgrep, ffmpeg, git):
+
+```bash
+sudo -u hermes -H bash -c 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash'
+```
+
+### 7b. Point it at DeepSeek
+
+```bash
+sudo -u hermes -H hermes    # opens a session
+# in the session:
+/model                      # pick "Custom endpoint": base https://api.deepseek.com/v1,
+                            # model deepseek-v4-flash, key = your DEEPSEEK_API_KEY
+```
+
+(Same key as `.env`'s `DEEPSEEK_API_KEY`. The digger and Hermes can share it.)
+
+### 7c. Telegram gateway + allowlist
+
+```bash
+sudo -u hermes -H hermes gateway setup     # paste the BotFather token; follow prompts
+# DM the bot once to pair, then allowlist only your chat id and turn on
+# command approval (the setup wizard covers both; see the Hermes docs for the
+# exact prompts). Nobody outside the allowlist can use it.
+```
+
+### 7d. Register the MCP server
+
+Merge `mcp/hermes-wsb.mcp-config.yaml` into `~/.hermes/mcp-config.yaml`:
+
+```bash
+sudo -u hermes -H bash -c 'cat /opt/hermes-digger/mcp/hermes-wsb.mcp-config.yaml >> ~/.hermes/mcp-config.yaml'
+```
+
+(or `hermes mcp add wsb --command /opt/hermes-digger/.venv/bin/python --args /opt/hermes-digger/mcp_server.py`).
+Then in a Hermes session: `/reload-mcp`, and `/tools` should list the seven `wsb` tools.
+
+### 7e. Keep the gateway running
+
+```bash
+sudo cp /opt/hermes-digger/systemd/hermes-agent.service /etc/systemd/system/
+# check ExecStart matches where `hermes` actually landed (`which hermes` as the user)
+sudo systemctl daemon-reload
+sudo systemctl enable --now hermes-agent.service
+journalctl -u hermes-agent.service -f
+```
+
+### 7f. Acceptance -- ask the bot from Telegram
+
+From your allowlisted chat:
+
+1. *"what's trending on wsb"* -> `get_trend`
+2. *"what's the sentiment on NVDA"* -> `get_sentiment`
+3. *"summarise today's daily thread"* -> `get_thread`
+4. *"is anyone bullish on oil right now?"* -> `search_comments` + `get_symbol`
+
+Then send the same bot a message from a non-allowlisted account -> it must be
+ignored. `bash scripts/healthcheck.sh` should still show the digger timer firing
+and `enrich_*` untouched -- Hermes only reads.
+

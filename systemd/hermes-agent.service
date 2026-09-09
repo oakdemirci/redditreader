@@ -1,0 +1,27 @@
+# Runs the Hermes Agent gateway (Telegram, etc.) as a service.
+#
+# Hermes Agent installs to the invoking user's ~/.hermes with its own venv; this
+# unit just keeps `hermes gateway start` alive. Adjust User= and the ExecStart
+# path to wherever you installed it. Do the interactive parts first (see
+# docs/DEPLOY.md): `hermes gateway setup`, `/model`, the chat-ID allowlist.
+
+[Unit]
+Description=Hermes Agent gateway
+After=network-online.target hermes-digger.timer
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes-digger
+Environment=HOME=/home/hermes
+# Hermes reads its own config from ~/.hermes; DEEPSEEK_API_KEY etc. can live there
+# or be passed here:
+EnvironmentFile=-/opt/hermes-digger/.env
+ExecStart=/home/hermes/.local/bin/hermes gateway start
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

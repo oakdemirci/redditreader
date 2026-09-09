@@ -363,6 +363,43 @@ def symbol_sentiment(db, symbol: str, *, limit: int = 14) -> list[DaySentiment]:
     ]
 
 
+@dataclass
+class SentimentBoard:
+    day: str | None
+    rows: list[tuple[str, str, float | None, str | None]]   # symbol, label, conf, rationale
+
+    def to_text(self) -> str:
+        if not self.rows:
+            return "no symbol-day sentiment scored yet"
+        L = [f"LLM sentiment for {self.day}:"]
+        for sym, label, conf, why in self.rows:
+            c = f" {conf:.0%}" if conf is not None else ""
+            L.append(f"  {sym:<6} {label.upper():<8}{c}  {why or ''}")
+        return "\n".join(L)
+
+
+def sentiment_board(db, *, day: str | None = None, limit: int = 30) -> SentimentBoard:
+    """The latest (or a given) trading day's symbol_day sentiment, bullish first."""
+    conn = _connect(db)
+    if day is None:
+        row = conn.execute(
+            "SELECT MAX(window_start) FROM sentiment WHERE scope='symbol_day'"
+        ).fetchone()
+        day = row[0] if row else None
+    if day is None:
+        return SentimentBoard(None, [])
+    rows = conn.execute(
+        """SELECT symbol, label, confidence, rationale FROM sentiment
+           WHERE scope='symbol_day' AND window_start = ?
+           ORDER BY CASE label WHEN 'buy' THEN 0 WHEN 'sell' THEN 2 ELSE 1 END,
+                    confidence DESC
+           LIMIT ?""",
+        (day, limit),
+    ).fetchall()
+    return SentimentBoard(day, [(r["symbol"], r["label"], r["confidence"], r["rationale"])
+                                for r in rows])
+
+
 def symbol_detail(db, symbol: str, *, days: int | None = None,
                   entity_mode: str = "regex",
                   with_sentiment: bool = False) -> SymbolDetail:

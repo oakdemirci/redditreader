@@ -1,0 +1,17 @@
+# Merge this block into ~/.hermes/mcp-config.yaml (Hermes Agent), then run
+# `/reload-mcp` in a Hermes session -- or use the one-liner in docs/DEPLOY.md.
+#
+# Serves the read-only WSB query tools (get_trend, get_symbol, get_sentiment,
+# search_comments, get_thread, list_threads, run_status). Runs as a stdio
+# subprocess of Hermes; it opens hermes.db query-only so it can't disturb the
+# digger.
+
+mcp_servers:
+  wsb:
+    command: /opt/hermes-digger/.venv/bin/python
+    args: ["/opt/hermes-digger/mcp_server.py"]
+    env:
+      HERMES_DB: /opt/hermes-digger/hermes.db
+    enabled: true
+    connect_timeout: 15
+    timeout: 60

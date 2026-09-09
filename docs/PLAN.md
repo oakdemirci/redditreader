@@ -386,7 +386,35 @@ prompt_ver, created_at)`. Feed a sentiment column / flag into
 agreement check on a sample; `trend()` shows a sentiment column; cost per
 symbol-day measured and within budget cap.
 
-### Phase 8 — MCP server + Hermes Agent + Telegram
+### Phase 8 — MCP server + Hermes Agent + Telegram  ✅ done (2026-09-10)
+
+Shipped: `mcp_server.py` (hand-rolled stdio MCP, stdlib only),
+`mcp/hermes-wsb.mcp-config.yaml`, `systemd/hermes-agent.service`,
+`scripts/ask-the-bot.sh`, `docs/DEPLOY.md` §7.
+
+* `mcp_server.py`: newline-delimited JSON-RPC 2.0 on stdio, no SDK. Handles
+  `initialize` (echoes a supported protocol version), `tools/list`, `tools/call`,
+  `ping`, notifications. Seven read-only tools -> `hermes_api` + `render`, each
+  returning `content` (text) + `structuredContent` (JSON). Opens `hermes.db`
+  `PRAGMA query_only`. `--selftest` runs the whole handshake + every tool
+  in-process; `--list` dumps schemas.
+* Tools: `get_trend`, `get_symbol`, `get_sentiment` (symbol history or day
+  board), `search_comments`, `get_thread` (id/url or daily/moves/weekend),
+  `list_threads`, `run_status`.
+* Hermes Agent is installed separately (`install.sh`, interactive); `/model` ->
+  DeepSeek custom endpoint; `hermes gateway setup` for Telegram + chat-id
+  allowlist + command approval; MCP registered via `~/.hermes/mcp-config.yaml`.
+  `systemd/hermes-agent.service` keeps the gateway up.
+* `scripts/ask-the-bot.sh` drives the MCP server through the four acceptance
+  scenarios (trend / sentiment / thread digest / free-form search+drill) --
+  passes against real data. The Telegram round-trip and the allowlist rejection
+  are manual checks in DEPLOY.md §7f (need a bot token + the box).
+
+Acceptance: MCP self-test green (9 checks); the four tool paths return correct
+answers; Telegram end-to-end + non-allowlisted rejection documented for the box.
+The digger/enrichment timers are untouched -- the MCP layer only reads.
+
+Original spec:
 
 Build `mcp_server.py` — a stdio MCP server wrapping `hermes_api.py` read-only
 (its own WAL connection): tools `get_trend`, `get_symbol`, `get_sentiment`,
