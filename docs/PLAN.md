@@ -1,6 +1,11 @@
 # Reddit digger → Hermes Agent: build plan
 
-Status: **planning** · Created 2026-09-10
+Status: **all 8 phases implemented** (2026-09-10) · Created 2026-09-10
+
+Not yet done: an actual Hetzner deploy (`docs/DEPLOY.md` is written but untested
+on a real box), and anything needing a live `DEEPSEEK_API_KEY` (the LLM entity /
+sentiment passes are built + fake-HTTP-tested; the precision/recall check on ~200
+labeled comments and the Telegram round-trip need the key + the box).
 
 ## Goal
 
@@ -437,8 +442,16 @@ and enrichment still running independently.
 
 ## Open items / decisions deferred
 
-- Enrichment granularity for sentiment (per-comment vs symbol-day aggregate) —
-  settle at Phase 7 start based on Phase 6 cost numbers.
-- Whether to keep `mydigger.py` (RSS) running in parallel as a backfill safety
-  net, or retire it once the Arctic Shift digger is proven on the box.
-- Object-storage backups (restic → Hetzner Storage Box) — deferred to post-Phase 8.
+- ~~Sentiment granularity~~ — settled Phase 7: `symbol_day` primary, `--per-comment`
+  optional (cost was trivial).
+- **Deploy to the box** — `docs/DEPLOY.md` §1-6 (digger) then §7 (Hermes/Telegram).
+  Untested end-to-end; needs the SSH access + a Telegram bot token.
+- **`DEEPSEEK_API_KEY`** — set it in `.env` to light up `enrich_entities` /
+  `enrich_sentiment` and Hermes's model. Then run
+  `tools/eval_entities.py --mode regex+llm` (grow the seed set to ~200 first).
+- Whether to retire `mydigger.py` (RSS) once the Arctic Shift digger has a few
+  full days on the box.
+- Object-storage backups (restic → Hetzner Storage Box) — sketch is in
+  `scripts/backup.sh` / DEPLOY.md §6, not automated.
+- `wsb-analysis-2026-09-04.md` / `wsb-trend-compare.xlsx` sit untracked in the
+  repo root (pre-existing; `.gitignore` them or commit them).
