@@ -21,6 +21,7 @@ Type=oneshot
 User=hermes
 Group=hermes
 WorkingDirectory=/opt/hermes-digger
+EnvironmentFile=-/opt/hermes-digger/.env
 ExecStart=/opt/hermes-digger/.venv/bin/python /opt/hermes-digger/digger.py --catch-up
 Nice=10
 TimeoutStartSec=3600

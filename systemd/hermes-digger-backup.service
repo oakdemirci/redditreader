@@ -1,0 +1,22 @@
+# Snapshot hermes.db. Paired with hermes-digger-backup.timer.
+
+[Unit]
+Description=Back up the Hermes WSB digger SQLite store
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes-digger
+EnvironmentFile=-/opt/hermes-digger/.env
+ExecStart=/bin/bash /opt/hermes-digger/scripts/backup.sh
+Nice=15
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/hermes-digger
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

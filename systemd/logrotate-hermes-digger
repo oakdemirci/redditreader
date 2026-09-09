@@ -1,0 +1,14 @@
+# Installed to /etc/logrotate.d/hermes-digger by scripts/install.sh.
+#
+# The digger logs to journald (capped via journald.conf.d/hermes-digger.conf),
+# so this only matters if you redirect a manual run to a file, e.g.
+#   digger.py --catch-up >> /opt/hermes-digger/digger.log 2>&1
+/opt/hermes-digger/*.log {
+    weekly
+    rotate 4
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}

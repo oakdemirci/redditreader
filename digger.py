@@ -184,9 +184,21 @@ def process_slice(conn, arc: Archive, subreddit: str, kinds: set[str],
 # --------------------------------------------------------------------------- #
 def run(conn, arc: Archive, subreddit: str, kinds: set[str], *,
         now: datetime | None = None, catch_up: bool = False,
-        max_hours: int | None = None, since: int | None = None, log=print) -> int:
+        max_hours: int | None = None, since: int | None = None,
+        backfill_days: int | None = None, log=print) -> int:
     now = now or datetime.now(timezone.utc)
     target = int(_floor_hour(now).timestamp())
+    known = tickers.load_known_stock_symbols()
+
+    if backfill_days:
+        # one wide slice: a single discovery sweep over the whole range, then each
+        # thread fetched from its own resume point. Leaves watermarks at `target`
+        # so the hourly timer picks up cleanly from here.
+        start = target - backfill_days * 86400
+        log(f"backfill {_iso(start)}..{_iso(target)} ({backfill_days}d)")
+        process_slice(conn, arc, subreddit, kinds, start, target, log, known_symbols=known)
+        return 1
+
     start = since if since is not None else compute_start(conn, now)
 
     if start >= target:
@@ -201,7 +213,6 @@ def run(conn, arc: Archive, subreddit: str, kinds: set[str], *,
     elif max_hours:
         pending = pending[:max_hours]
 
-    known = tickers.load_known_stock_symbols()
     for slice_start, slice_end in pending:
         process_slice(conn, arc, subreddit, kinds, slice_start, slice_end, log,
                       known_symbols=known)
@@ -218,10 +229,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Hourly delta digger for r/wallstreetbets (Arctic Shift -> SQLite).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Defaults for --db/--subreddit/--kinds come from HERMES_DB / "
+               "HERMES_SUBREDDIT / HERMES_KINDS when set (systemd EnvironmentFile).",
     )
-    parser.add_argument("--db", default=str(store.DEFAULT_DB))
-    parser.add_argument("--subreddit", default="wallstreetbets")
-    parser.add_argument("--kinds", default=DEFAULT_KINDS,
+    parser.add_argument("--db", default=os.environ.get("HERMES_DB", str(store.DEFAULT_DB)))
+    parser.add_argument("--subreddit",
+                        default=os.environ.get("HERMES_SUBREDDIT", "wallstreetbets"))
+    parser.add_argument("--kinds", default=os.environ.get("HERMES_KINDS", DEFAULT_KINDS),
                         help=f"megathread kinds and/or flair names (default: {DEFAULT_KINDS})")
     parser.add_argument("--catch-up", action="store_true",
                         help="process every pending hour, not just the oldest one")
@@ -229,6 +243,9 @@ def main() -> None:
                         help="with --catch-up, stop after N slices this invocation")
     parser.add_argument("--since", metavar="TS",
                         help="ignore the stored watermark and start here (ISO or epoch)")
+    parser.add_argument("--backfill", type=int, default=None, metavar="DAYS",
+                        help="one-shot: sweep the last DAYS days in a single pass, then "
+                             "leave the watermarks at now for the hourly timer")
     parser.add_argument("--min-interval", type=float, default=2.0, metavar="SEC")
     parser.add_argument("--ignore-lock", action="store_true",
                         help="run even if digger.lock is held (use only when sure)")
@@ -244,7 +261,8 @@ def main() -> None:
         arc = Archive(min_interval=args.min_interval, verbose=False)
         since = parse_time(args.since) if args.since else None
         n = run(conn, arc, args.subreddit, parse_kinds(args.kinds),
-                catch_up=args.catch_up, max_hours=args.max_hours, since=since, log=log)
+                catch_up=args.catch_up, max_hours=args.max_hours, since=since,
+                backfill_days=args.backfill, log=log)
         log(f"done ({n} slice(s))")
         conn.close()
     finally:

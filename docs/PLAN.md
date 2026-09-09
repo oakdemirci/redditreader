@@ -216,7 +216,30 @@ renderer for chat.
 the new `trend()` output matches the existing `trend.py` output; query functions
 have unit tests against a fixture DB.
 
-### Phase 4 — Deploy the digger to Hetzner (interim runbook)
+### Phase 4 — Deploy the digger to Hetzner (interim runbook)  ✅ done (2026-09-10)
+
+Shipped: [`docs/DEPLOY.md`](DEPLOY.md), `scripts/{install,backup,healthcheck}.sh`,
+`systemd/hermes-digger-backup.{service,timer}` + `logrotate-hermes-digger`,
+`.env.example`.
+
+* `digger.py --backfill DAYS` -- one wide `process_slice` over the whole range
+  (single discovery sweep + full per-thread fetch), leaving watermarks at `now`
+  so the hourly timer continues cleanly.
+* `digger.py` reads `HERMES_DB` / `HERMES_SUBREDDIT` / `HERMES_KINDS` as arg
+  defaults; the service unit has `EnvironmentFile=-/opt/hermes-digger/.env`.
+* `backup.sh` uses the sqlite online-backup API via Python (no `sqlite3` CLI
+  dependency), gzips, `integrity_check`s, keeps newest `BACKUP_KEEP` (7). Daily
+  timer at 03:30. Off-box (restic -> Storage Box) documented, not automated.
+* `install.sh` is idempotent (re-run after `git pull`): packages, `hermes` user,
+  venv, `.env` from example, units enabled, journald capped at 500 MB.
+* `healthcheck.sh`: timers + last run + `ingest.py --stats` + disk; exit 1 if the
+  last run isn't ok/partial.
+* Verified locally: backup rotation (keep 2 of 3), restore drill
+  (`integrity_check ok`, row counts match), `bash -n` on all scripts, backfill
+  path. Box-side steps (systemd, journald) are documented but untested until a
+  real deploy.
+
+Original spec:
 
 Produce a reproducible install runbook and helper scripts to run Phases 1–3 on
 the Hetzner box, so real data starts accumulating while later phases are built.

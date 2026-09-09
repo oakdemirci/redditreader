@@ -6,8 +6,10 @@ __pycache__/
 *.db-wal
 *.db-shm
 digger.log
+*.log
 wsb_data/
 archive/
+backups/
 tickers_cache.txt
 *.lock
 

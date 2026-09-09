@@ -1,0 +1,12 @@
+# Daily SQLite snapshot, well clear of the hourly digger ticks.
+
+[Unit]
+Description=Daily Hermes WSB digger backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
