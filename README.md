@@ -16,11 +16,20 @@ field, hourly delta ingest into `hermes.db` (SQLite).
     python ingest.py --thread 1wbh9od          # one thread, all comments -> hermes.db
     python ingest.py --window 2026-09-08 2026-09-10 --kinds daily,moves
     python digger.py --catch-up                # hourly delta job (see systemd/)
+    python extract.py                          # regex ticker/coin -> entities
+    python trend.py                            # same report, now over hermes.db
+    python report.py --symbol AAPL
     python ingest.py --stats                   # watermarks, last run
 
 Modules: `arctic.py` (client), `store.py` (schema + tree reconstruction),
-`ingest.py` (discovery + CLI), `digger.py` (the scheduled job). `wsb_tree.py`
-is a thin wrapper that also writes one JSON file per thread.
+`ingest.py` (discovery + CLI), `digger.py` (scheduled job), `wsbcal.py`
+(trading-day calendar), `extract.py` (regex mentions), `hermes_api.py` (read-only
+query layer behind `trend.py`/`report.py`). `wsb_tree.py` is a thin wrapper that
+also writes one JSON file per thread. `python tests/test_hermes_api.py` runs the
+fixture tests.
+
+> `trend.py` and `report.py` now read `hermes.db`. For the old RSS DB, the
+> pre-Phase-3 versions are at git `b0e6337`.
 
 ---
 

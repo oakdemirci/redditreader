@@ -167,7 +167,36 @@ threads, new comments, duration).
 windows; a deliberately deleted `runs` row triggers correct catch-up; killing the
 process mid-run and rerunning resumes cleanly with no duplicates.
 
-### Phase 3 — Trend engine ported to the new store + query API
+### Phase 3 — Trend engine ported to the new store + query API  ✅ done (2026-09-10)
+
+Shipped: `hermes_api.py` (query layer), `extract.py` (regex tier -> `entities`),
+`wsbcal.py` (trading-day resolver, ported from `mydigger.py`). `trend.py` and
+`report.py` rewritten as thin CLIs over `hermes_api`, reading `hermes.db`.
+
+* **Mentions live in `entities` now**, filled by the regex tier (`source='regex'`,
+  `tier` in cashtag/bareword/unverified; `__none__` sentinel for scanned-empty).
+  `digger.py` runs `extract.extract_pending()` after each slice; `ingest.py` runs
+  it at the end unless `--no-extract`. Phase 6 adds `source='llm'` alongside;
+  counts use `COUNT(DISTINCT comment_id)` so a comment matched by both tiers is
+  one mention.
+* **schema v2 -> v3**: `threads.trading_day` (backfilled via `wsbcal`), `entities`
+  gains `tier` and drops `type NOT NULL` (rebuilt -- was empty). `_migrate()` now
+  runs *before* `executescript(SCHEMA)` so new indexes don't reference
+  not-yet-added columns.
+* The trend maths (share-of-voice `HOT`, `NEW` window, `$` flag, relevance score
+  + ordering, `PARTIAL_COMMENT_THRESHOLD`) is a line-for-line port. Locked down by
+  `tests/test_hermes_api.py` (7 fixture tests: `python tests/test_hermes_api.py`
+  or pytest).
+* `hermes_api` also exposes `symbol_detail`, `search_comments`, `threads`,
+  `day_report`, `run_status` -- each returns a dataclass with `.to_text()` /
+  `.to_markdown()`, ready for the Phase 8 MCP server.
+* `trend.py --include-flair[=gain,loss,discussion]` widens beyond megathreads.
+* **`trend.py`/`report.py` now read `hermes.db`, not `wsb_comments.db`** -- the
+  RSS pipeline's reporting is superseded (old versions in git history at
+  `b0e6337`). `mydigger.py` still runs independently; retire-or-keep is the
+  standing open item.
+
+Original spec:
 
 Port the business logic in `trend.py` and `report.py` to read the Phase 1
 schema. Reproduce the `SYM` table exactly: `TOT` (mentions in window), `$`

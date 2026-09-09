@@ -1,122 +1,64 @@
+#!/usr/bin/env python3
+"""Most-mentioned tickers/coins for a stored day's WSB threads.
+
+Thin CLI over ``hermes_api`` reading the Arctic Shift store (``hermes.db``).
+
+    python report.py                       # today (US Eastern)
+    python report.py --date 2026-09-02
+    python report.py --by-thread            # split counts by source thread
+    python report.py --symbol AAPL          # the actual comments behind a row
+    python report.py --include-flair        # also count gain/loss/discussion posts
+"""
+
+from __future__ import annotations
+
 import argparse
-import sqlite3
 import sys
-from pathlib import Path
 
 import clock
-
-DB_PATH = Path(__file__).parent / "wsb_comments.db"
+import hermes_api
+import store
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
-def show_symbol_comments(conn: sqlite3.Connection, symbol: str) -> None:
-    """Print every stored comment that triggered a mention of `symbol`, across
-    all archived days, so a summary-table entry can be manually sanity-checked."""
-    rows = conn.execute(
-        """
-        SELECT dt.date, dt.kind, m.confidence, c.author, c.posted_at, c.body
-        FROM mentions m
-        JOIN comments c ON c.id = m.comment_id
-        JOIN daily_threads dt ON dt.thread_id = c.thread_id
-        WHERE m.symbol = ?
-        ORDER BY c.posted_at
-        """,
-        (symbol,),
-    ).fetchall()
-
-    if not rows:
-        print(f"No stored comments mention {symbol}.")
-        return
-
-    print(f"{len(rows)} comment(s) mentioning {symbol}:\n")
-    for date_str, kind, confidence, author, posted_at, body in rows:
-        print(f"[{date_str} {kind}] [{confidence}] {posted_at}  {author}")
-        print(f"  {body}\n")
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Most-mentioned tickers/coins for a stored day's WSB megathreads."
-    )
-    parser.add_argument(
-        "--date",
-        default=clock.market_today().isoformat(),
-        metavar="YYYY-MM-DD",
-        help="Which day to report on (default: today, US Eastern).",
-    )
-    parser.add_argument(
-        "--by-thread",
-        action="store_true",
-        help="Break the counts out by source thread (daily / moves) instead of merging.",
-    )
-    parser.add_argument(
-        "--symbol",
-        metavar="SYM",
-        help="Show the actual stored comments behind this symbol's mentions "
-        "(across all archived days, ignoring --date) instead of the summary table. "
-        "Use this to sanity-check anything the summary flags as suspicious.",
-    )
-    args = parser.parse_args()
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--date", default=clock.market_today().isoformat(), metavar="YYYY-MM-DD",
+                   help="which trading day to report on (default: today, US Eastern)")
+    p.add_argument("--by-thread", action="store_true",
+                   help="break counts out by source thread instead of merging")
+    p.add_argument("--symbol", metavar="SYM",
+                   help="show the stored comments behind this symbol (all days) "
+                        "instead of the summary table")
+    p.add_argument("--days", type=int, default=None, metavar="N",
+                   help="with --symbol, limit to the last N trading days")
+    p.add_argument("--include-flair", nargs="?", const="gain,loss,discussion",
+                   default=None, metavar="KINDS",
+                   help="also count flaired standalone posts (default: gain,loss,discussion)")
+    p.add_argument("--db", default=str(store.DEFAULT_DB))
+    args = p.parse_args()
 
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = store.connect(args.db)
 
     if args.symbol:
-        show_symbol_comments(conn, args.symbol.upper())
-        conn.close()
+        print(hermes_api.symbol_detail(conn, args.symbol, days=args.days).to_text())
         return
 
-    threads = conn.execute(
-        "SELECT kind, thread_id, title FROM daily_threads WHERE date = ? ORDER BY kind",
-        (args.date,),
-    ).fetchall()
-    if not threads:
-        recent_dates = [
-            row[0] for row in conn.execute(
-                "SELECT DISTINCT date FROM daily_threads ORDER BY date DESC LIMIT 5"
-            )
-        ]
+    kinds = list(hermes_api.MEGA_KINDS)
+    if args.include_flair is not None:
+        kinds += hermes_api.expand_kinds(args.include_flair.split(","))
+
+    report = hermes_api.day_report(conn, args.date, kinds=kinds, by_thread=args.by_thread)
+    if not report.threads:
+        recent = [r["trading_day"] for r in conn.execute(
+            "SELECT DISTINCT trading_day FROM threads ORDER BY trading_day DESC LIMIT 5"
+        )]
         print(f"No thread recorded for {args.date}.")
-        if recent_dates:
-            print(f"Available: {', '.join(recent_dates)}  (use --date)")
+        if recent:
+            print(f"Available: {', '.join(recent)}  (use --date)")
         return
-
-    for kind, _thread_id, title in threads:
-        print(f"[{kind}] {title}")
-    print()
-
-    group_cols = "m.symbol, dt.kind" if args.by_thread else "m.symbol"
-    rows = conn.execute(
-        f"""
-        SELECT
-            m.symbol,
-            {"dt.kind," if args.by_thread else ""}
-            GROUP_CONCAT(DISTINCT m.confidence) AS confidences,
-            COUNT(DISTINCT m.comment_id) AS mentions
-        FROM mentions m
-        JOIN comments c ON c.id = m.comment_id
-        JOIN daily_threads dt ON dt.thread_id = c.thread_id
-        WHERE dt.date = ? AND m.symbol != '__none__'
-        GROUP BY {group_cols}
-        ORDER BY mentions DESC, m.symbol ASC
-        """,
-        (args.date,),
-    ).fetchall()
-
-    if not rows:
-        print("No ticker/coin mentions found yet.")
-        return
-
-    if args.by_thread:
-        print(f"{'Symbol':<8}{'Src':<8}{'Mentions':<10}{'Confidence'}")
-        for symbol, kind, confidence, mentions in rows:
-            print(f"{symbol:<8}{kind:<8}{mentions:<10}{confidence}")
-    else:
-        print(f"{'Symbol':<8}{'Mentions':<10}{'Confidence'}")
-        for symbol, confidence, mentions in rows:
-            print(f"{symbol:<8}{mentions:<10}{confidence}")
-
-    conn.close()
+    print(report.to_text())
 
 
 if __name__ == "__main__":

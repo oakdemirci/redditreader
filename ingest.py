@@ -223,6 +223,8 @@ def main() -> None:
     parser.add_argument("--max-comments", type=int, default=None, metavar="N")
     parser.add_argument("--min-interval", type=float, default=2.0, metavar="SEC")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--no-extract", action="store_true",
+                        help="skip the regex ticker/coin extraction pass afterwards")
     parser.add_argument("--stats", action="store_true", help="print store stats and exit")
     args = parser.parse_args()
 
@@ -247,17 +249,22 @@ def main() -> None:
         ingest_thread(conn, arc, posts[0], kind, md2html=args.md2html,
                       window=window, cap=args.max_comments,
                       export_dir=args.export_json)
-        return
-
-    if not window:
+    elif not window:
         sys.exit("give --thread ID, or --window START END for discovery")
+    else:
+        result = ingest_window(conn, arc, args.subreddit, window[0], window[1],
+                               parse_kinds(args.kinds), md2html=args.md2html,
+                               comment_window=args.comment_window,
+                               export_dir=args.export_json)
+        print(f"\nrun {result['run_id']}: {result['threads']} thread(s), "
+              f"+{result['new_comments']} new comment(s)")
 
-    result = ingest_window(conn, arc, args.subreddit, window[0], window[1],
-                           parse_kinds(args.kinds), md2html=args.md2html,
-                           comment_window=args.comment_window,
-                           export_dir=args.export_json)
-    print(f"\nrun {result['run_id']}: {result['threads']} thread(s), "
-          f"+{result['new_comments']} new comment(s)")
+    if not args.no_extract:
+        import extract
+        import tickers
+        n = extract.extract_pending(conn, tickers.load_known_stock_symbols(), verbose=False)
+        if n:
+            print(f"extracted ticker/coin mentions from {n} comment(s)")
 
 
 if __name__ == "__main__":

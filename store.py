@@ -24,9 +24,10 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+import wsbcal
 from arctic import bare_id
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS threads (
@@ -41,8 +42,10 @@ CREATE TABLE IF NOT EXISTS threads (
     last_polled  TEXT,                      -- ISO-8601 UTC, last comment fetch
     is_open      INTEGER NOT NULL DEFAULT 1,-- 0 once the thread is old and quiet
     comments_through INTEGER,               -- epoch; comments confirmed fetched up to here
+    trading_day  TEXT,                      -- YYYY-MM-DD the reports count this thread under
     post_json    TEXT NOT NULL              -- full submission object
 );
+CREATE INDEX IF NOT EXISTS threads_trading_day ON threads(trading_day);
 
 CREATE TABLE IF NOT EXISTS comments (
     id               TEXT PRIMARY KEY,      -- base-36, no t1_ prefix
@@ -75,19 +78,23 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS runs_status_end ON runs(status, window_end);
 
--- Populated by Phase 6 (LLM entity extraction). Shape frozen now.
+-- Ticker / coin mentions. Phase 3 fills the regex tier (source='regex'); Phase 6
+-- adds source='llm'. A comment scanned with nothing found gets one sentinel row
+-- symbol='__none__' so it isn't rescanned.
 CREATE TABLE IF NOT EXISTS entities (
     comment_id  TEXT NOT NULL,
-    symbol      TEXT NOT NULL,              -- normalised ticker / handle, upper-case
+    symbol      TEXT NOT NULL,              -- normalised ticker / handle, upper-case ('__none__' = scanned, empty)
     name        TEXT,                       -- 'Apple Inc.' etc. when the LLM supplies one
-    type        TEXT NOT NULL,              -- stock | crypto | token
-    confidence  REAL,
+    type        TEXT,                       -- stock | crypto | token | NULL (sentinel)
+    tier        TEXT,                       -- cashtag | bareword | unverified (regex) | llm
+    confidence  REAL,                       -- LLM numeric score; NULL for regex
     source      TEXT NOT NULL,              -- regex | llm
     model       TEXT,
     prompt_ver  TEXT,
     PRIMARY KEY (comment_id, symbol, source)
 );
 CREATE INDEX IF NOT EXISTS entities_symbol ON entities(symbol);
+CREATE INDEX IF NOT EXISTS entities_comment ON entities(comment_id);
 
 -- Populated by Phase 7 (LLM sentiment). Shape frozen now.
 CREATE TABLE IF NOT EXISTS sentiment (
@@ -127,8 +134,8 @@ def connect(path: str | Path = DEFAULT_DB) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    _migrate(conn)          # ALTER old DBs before the indexes in SCHEMA reference new columns
     conn.executescript(SCHEMA)
-    _migrate(conn)
     conn.execute(
         "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -139,15 +146,40 @@ def connect(path: str | Path = DEFAULT_DB) -> sqlite3.Connection:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Bring a pre-existing DB up to the current schema. Additive only."""
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(threads)")}
-    if "comments_through" not in cols:  # v1 -> v2
+    """Bring a pre-existing DB up to the current schema, additively. Runs before
+    SCHEMA creates tables/indexes, so a brand-new DB (no `threads` table yet) is
+    a no-op here and gets the current schema straight from SCHEMA."""
+    have_tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    if "threads" not in have_tables:
+        return
+
+    tcols = {row[1] for row in conn.execute("PRAGMA table_info(threads)")}
+    if "comments_through" not in tcols:  # v1 -> v2
         conn.execute("ALTER TABLE threads ADD COLUMN comments_through INTEGER")
         conn.execute(
             "UPDATE threads SET comments_through = COALESCE("
             "  (SELECT MAX(created_utc) FROM comments WHERE comments.thread_id = threads.id),"
             "  created_utc)"
         )
+
+    if "trading_day" not in tcols:  # v2 -> v3
+        conn.execute("ALTER TABLE threads ADD COLUMN trading_day TEXT")
+        for tid, kind, title, created in conn.execute(
+            "SELECT id, kind, title, created_utc FROM threads"
+        ).fetchall():
+            day = wsbcal.trading_day(kind, title or "", created).isoformat()
+            conn.execute("UPDATE threads SET trading_day = ? WHERE id = ?", (day, tid))
+
+    if "entities" in have_tables:
+        ecols = {row[1] for row in conn.execute("PRAGMA table_info(entities)")}
+        if "tier" not in ecols:  # v2 -> v3: entities gained `tier`, `type` now nullable.
+            # entities is unpopulated before Phase 3, so a clean drop is safe;
+            # SCHEMA recreates it right after this.
+            conn.execute("DROP TABLE entities")
     conn.commit()
 
 
@@ -159,13 +191,15 @@ def upsert_thread(conn: sqlite3.Connection, kind: str, post: dict,
     """Insert the thread or refresh its volatile fields, preserving first_seen."""
     tid = bare_id(post["id"])
     now = _now_iso()
+    title = (post.get("title") or "").strip()
+    day = wsbcal.trading_day(kind, title, post.get("created_utc")).isoformat()
     conn.execute(
         """
         INSERT INTO threads (id, kind, subreddit, title, flair, created_utc,
                              permalink, first_seen, last_polled, is_open,
-                             comments_through, post_json)
+                             comments_through, trading_day, post_json)
         VALUES (:id, :kind, :subreddit, :title, :flair, :created_utc,
-                :permalink, :now, :now, :is_open, :created_utc, :post_json)
+                :permalink, :now, :now, :is_open, :created_utc, :trading_day, :post_json)
         ON CONFLICT(id) DO UPDATE SET
             kind        = excluded.kind,
             title       = excluded.title,
@@ -173,18 +207,20 @@ def upsert_thread(conn: sqlite3.Connection, kind: str, post: dict,
             permalink   = excluded.permalink,
             is_open     = excluded.is_open,
             last_polled = excluded.last_polled,
+            trading_day = excluded.trading_day,
             post_json   = excluded.post_json
         """,
         {
             "id": tid,
             "kind": kind,
             "subreddit": post.get("subreddit") or "",
-            "title": (post.get("title") or "").strip(),
+            "title": title,
             "flair": post.get("link_flair_text"),
             "created_utc": post.get("created_utc"),
             "permalink": post.get("permalink"),
             "now": now,
             "is_open": 1 if is_open else 0,
+            "trading_day": day,
             "post_json": json.dumps(post, ensure_ascii=False),
         },
     )
@@ -282,6 +318,44 @@ def finish_run(conn: sqlite3.Connection, run_id: int, status: str, *,
         (status, n_threads, n_comments_new, _now_iso(), error, run_id),
     )
     conn.commit()
+
+
+# --- entity extraction (Phase 3 regex tier; Phase 6 adds llm) ------------ #
+def comments_without_entities(conn: sqlite3.Connection, source: str,
+                              limit: int | None = None) -> list[sqlite3.Row]:
+    """Stored comments that have no `entities` row for `source` yet."""
+    sql = (
+        "SELECT c.id, c.body FROM comments c "
+        "WHERE NOT EXISTS (SELECT 1 FROM entities e "
+        "                  WHERE e.comment_id = c.id AND e.source = ?)"
+    )
+    params: list = [source]
+    if limit:
+        sql += " LIMIT ?"
+        params.append(limit)
+    return conn.execute(sql, params).fetchall()
+
+
+def save_entities(conn: sqlite3.Connection, comment_id: str,
+                  found: list[dict], *, source: str, model: str | None = None,
+                  prompt_ver: str | None = None) -> None:
+    """Replace this comment's rows for `source`. ``found`` items are
+    ``{symbol, type, tier, confidence, name}`` (any optional). An empty list
+    writes the ``__none__`` sentinel so the comment isn't rescanned."""
+    conn.execute(
+        "DELETE FROM entities WHERE comment_id = ? AND source = ?", (comment_id, source)
+    )
+    rows = found or [{"symbol": "__none__"}]
+    conn.executemany(
+        "INSERT OR IGNORE INTO entities "
+        "(comment_id, symbol, name, type, tier, confidence, source, model, prompt_ver) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (comment_id, r["symbol"], r.get("name"), r.get("type"), r.get("tier"),
+             r.get("confidence"), source, model, prompt_ver)
+            for r in rows
+        ],
+    )
 
 
 # --- watermarks & thread lifecycle (the hourly digger) ------------------- #

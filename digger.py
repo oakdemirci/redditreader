@@ -37,7 +37,9 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+import extract
 import store
+import tickers
 from arctic import Archive, ArchiveError
 from ingest import DEFAULT_KINDS, classify, parse_kinds, parse_time
 
@@ -107,7 +109,7 @@ def release_lock() -> None:
 #  one slice                                                                   #
 # --------------------------------------------------------------------------- #
 def process_slice(conn, arc: Archive, subreddit: str, kinds: set[str],
-                  start: int, end: int, log) -> str:
+                  start: int, end: int, log, known_symbols: set[str] | None = None) -> str:
     run_id = store.start_run(conn, _iso(start), _iso(end))
     discovered = 0
     fetched_threads = 0
@@ -148,7 +150,13 @@ def process_slice(conn, arc: Archive, subreddit: str, kinds: set[str],
                 log(f"thread id={t['id']} kind={t['kind']} "
                     f"fetched={len(comments)} new={inserted} upd={updated}")
 
-        # 3. retire threads that are old and quiet
+        # 3. regex ticker/coin extraction over the comments just added
+        if known_symbols is not None:
+            scanned = extract.extract_pending(conn, known_symbols, verbose=False)
+            if scanned:
+                log(f"extracted entities from {scanned} new comment(s)")
+
+        # 4. retire threads that are old and quiet
         closed = store.close_stale_threads(
             conn, end, max_age_hours=CLOSE_MAX_AGE_HOURS, quiet_hours=CLOSE_QUIET_HOURS
         )
@@ -193,8 +201,10 @@ def run(conn, arc: Archive, subreddit: str, kinds: set[str], *,
     elif max_hours:
         pending = pending[:max_hours]
 
+    known = tickers.load_known_stock_symbols()
     for slice_start, slice_end in pending:
-        process_slice(conn, arc, subreddit, kinds, slice_start, slice_end, log)
+        process_slice(conn, arc, subreddit, kinds, slice_start, slice_end, log,
+                      known_symbols=known)
     return len(pending)
 
 
