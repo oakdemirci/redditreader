@@ -242,15 +242,22 @@ class Archive:
         cursor = after
         total = 0
         while True:
+            # only `after` goes to the server -- `comments/search` 422s ("slow
+            # down") when `after` and `before` are both set over a wide range.
+            # `before` is enforced here by stopping once the feed reaches it.
             batch = self.get("comments/search", subreddit=subreddit, after=cursor,
-                             before=before, sort="asc", limit=PAGE, md2html=_yn(md2html))
+                             sort="asc", limit=PAGE, md2html=_yn(md2html))
             if not batch:
                 break
             added = 0
             newest = cursor or 0
+            reached_end = False
             for comment in batch:
                 ts = comment.get("created_utc") or 0
                 newest = max(newest, ts)
+                if ts >= before:
+                    reached_end = True
+                    continue
                 if comment["id"] in seen:
                     continue
                 seen.add(comment["id"])
@@ -264,7 +271,7 @@ class Archive:
                 on_progress(total)
             else:
                 self._log(f"{total} in-scope comments, {len(seen)} scanned")
-            if len(batch) < PAGE:
+            if reached_end or len(batch) < PAGE:
                 break
             cursor = newest + 1 if added == 0 else newest - 1
         return out
