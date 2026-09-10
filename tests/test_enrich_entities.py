@@ -123,6 +123,25 @@ def test_prefilter_and_calls():
                         ).fetchone()["symbol"] == "__none__"
 
 
+def test_bad_api_response_is_not_fatal():
+    conn = _seed()
+    good = llm.requests.post
+
+    def broken(*a, **k):
+        return _FakeResp({"choices": [{"message": {"content": ""}}], "usage": {}})
+
+    llm.requests.post = broken  # type: ignore
+    try:
+        r = enrich_entities.enrich_pending(conn, KNOWN, verbose=False)  # must not raise
+    finally:
+        llm.requests.post = good  # type: ignore
+    assert r["skipped_budget"] is True and r["calls"] == 0
+    # a later good run still works
+    enrich_entities.enrich_pending(conn, KNOWN, verbose=False)
+    assert conn.execute("SELECT COUNT(*) FROM entities WHERE comment_id='c1' AND symbol='PLTR'"
+                        ).fetchone()[0] == 1
+
+
 def test_cache_makes_rerun_free():
     conn = _seed()
     enrich_entities.enrich_pending(conn, KNOWN, verbose=False)

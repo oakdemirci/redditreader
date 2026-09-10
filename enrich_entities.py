@@ -146,6 +146,11 @@ def enrich_pending(conn, known: set[str], *, limit: int | None = None,
                 print(f"stopping: {exc} ({len(to_send) - i} comment(s) left for next run)")
             skipped_budget = True
             break
+        except llm.LLMError as exc:
+            if verbose:
+                print(f"stopping: {exc} (check DEEPSEEK_API_KEY / HERMES_LLM_MODEL)")
+            skipped_budget = True   # leave the rest for a later run
+            break
         calls += 1
         by_id = {r.get("comment_id"): r.get("symbols", []) for r in reply.get("results", [])}
         for cid, body in batch:

@@ -113,7 +113,7 @@ def enrich_symbol_days(conn, *, days: int = DEFAULT_DAYS,
                 cached = llm.chat_json(conn, task=TASK, prompt_ver=PROMPT_VER,
                                        system=SYSTEM_DAY, user=user, n_items=len(rows),
                                        budget_usd=budget_usd, max_tokens=400)
-            except llm.BudgetExceeded as exc:
+            except (llm.BudgetExceeded, llm.LLMError) as exc:
                 if verbose:
                     print(f"stopping: {exc}")
                 skipped_budget = True
@@ -161,7 +161,7 @@ def enrich_comments(conn, *, symbol: str, day: str, kinds=hermes_api.MEGA_KINDS,
             reply = llm.chat_json(conn, task=TASK, prompt_ver=PROMPT_VER,
                                   system=SYSTEM_COMMENT, user=user, n_items=len(chunk),
                                   budget_usd=budget_usd)
-        except llm.BudgetExceeded as exc:
+        except (llm.BudgetExceeded, llm.LLMError) as exc:
             print(f"stopping: {exc}")
             break
         calls += 1

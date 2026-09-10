@@ -164,16 +164,24 @@ def process_slice(conn, arc: Archive, subreddit: str, kinds: set[str],
                 store.set_comments_through(conn, tid, end)
 
         # 3. regex ticker/coin extraction over the comments just added, then
-        #    (opt-in, budget-capped) the LLM disambiguation pass
+        #    (opt-in, budget-capped) the LLM disambiguation pass. Enrichment is
+        #    best-effort -- the comments are already stored, so a failure here
+        #    must not fail the slice.
         if known_symbols is not None:
-            scanned = extract.extract_pending(conn, known_symbols, verbose=False)
-            if scanned:
-                log(f"extracted entities from {scanned} new comment(s)")
+            try:
+                scanned = extract.extract_pending(conn, known_symbols, verbose=False)
+                if scanned:
+                    log(f"extracted entities from {scanned} new comment(s)")
+            except Exception as exc:  # noqa: BLE001
+                log(f"regex extraction failed (non-fatal): {exc!r}")
         if use_llm and llm.available():
-            r = enrich_entities.enrich_pending(conn, known_symbols or set(), verbose=False)
-            if r["scanned"]:
-                log(f"llm entities: {r['scanned']} scanned, {r['calls']} call(s)"
-                    + (" (budget hit)" if r["skipped_budget"] else ""))
+            try:
+                r = enrich_entities.enrich_pending(conn, known_symbols or set(), verbose=False)
+                if r["scanned"]:
+                    log(f"llm entities: {r['scanned']} scanned, {r['calls']} call(s)"
+                        + (" (budget hit)" if r["skipped_budget"] else ""))
+            except Exception as exc:  # noqa: BLE001
+                log(f"llm entity pass failed (non-fatal): {exc!r}")
 
         # 4. retire threads that are old and quiet, then snapshot + shrink them
         closed = store.close_stale_threads(

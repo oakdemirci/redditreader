@@ -37,6 +37,11 @@ class BudgetExceeded(RuntimeError):
     """The day's LLM spend has reached the cap."""
 
 
+class LLMError(RuntimeError):
+    """The API call failed or returned something unusable. Callers treat the
+    enrichment step as best-effort and carry on."""
+
+
 def api_key() -> str:
     return os.environ.get("DEEPSEEK_API_KEY", "").strip()
 
@@ -133,23 +138,38 @@ def chat_json(conn, *, task: str, prompt_ver: str, system: str, user: str,
             if attempt == MAX_RETRIES:
                 _log(conn, created_at=started, task=task, prompt_ver=prompt_ver,
                      n_items=n_items, usage={}, cost=0.0, ok=0,
-                     error=f"HTTP {resp.status_code}")
-                resp.raise_for_status()
+                     error=f"HTTP {resp.status_code} (retries exhausted)")
+                raise LLMError(f"{task}: HTTP {resp.status_code} after {MAX_RETRIES} tries")
             time.sleep(backoff)
             backoff = min(backoff * 2, 60)
             continue
 
-        resp.raise_for_status()
-        data = resp.json()
+        if resp.status_code >= 400:
+            body = (getattr(resp, "text", "") or "")[:200]
+            _log(conn, created_at=started, task=task, prompt_ver=prompt_ver,
+                 n_items=n_items, usage={}, cost=0.0, ok=0,
+                 error=f"HTTP {resp.status_code} {body!r}")
+            raise LLMError(f"{task}: HTTP {resp.status_code} {body!r}")
+
+        try:
+            data = resp.json()
+            content = data["choices"][0]["message"].get("content") or ""
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            snippet = (getattr(resp, "text", "") or "")[:200]
+            _log(conn, created_at=started, task=task, prompt_ver=prompt_ver,
+                 n_items=n_items, usage={}, cost=0.0, ok=0,
+                 error=f"unexpected response: {exc} :: {snippet!r}")
+            raise LLMError(f"{task}: unexpected API response ({exc})")
+
         usage = data.get("usage", {})
         cost = cost_of(usage)
-        content = data["choices"][0]["message"]["content"]
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError as exc:
             _log(conn, created_at=started, task=task, prompt_ver=prompt_ver,
-                 n_items=n_items, usage=usage, cost=cost, ok=0, error=f"bad json: {exc}")
-            raise
+                 n_items=n_items, usage=usage, cost=cost, ok=0,
+                 error=f"non-JSON content: {content[:120]!r}")
+            raise LLMError(f"{task}: model did not return JSON ({exc})")
         _log(conn, created_at=started, task=task, prompt_ver=prompt_ver,
              n_items=n_items, usage=usage, cost=cost, ok=1, error=None)
         return parsed
