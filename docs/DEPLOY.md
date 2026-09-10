@@ -15,6 +15,8 @@ Target: a small Debian/Ubuntu VM. Disk need is modest (~5-6 GB/year for the DB,
 sudo mkdir -p /opt/hermes-digger
 sudo chown "$USER" /opt/hermes-digger
 git clone git@github.com:oakdemirci/redditreader.git /opt/hermes-digger
+OR
+git clone https://github.com/oakdemirci/redditreader.git /opt/hermes-digger
 # (uses your GitHub auth; the repo's id_deploy key is one option -- add it to
 #  ssh-agent or ~/.ssh/config as the identity for github.com)
 ```
@@ -45,15 +47,50 @@ Review `/opt/hermes-digger/.env`:
 
 ## 3. Backfill initial history
 
-One-shot, runs as the `hermes` user. A day of history is a few minutes
-(discovery sweep + a full fetch of each thread); 7 days ~= 20-40 min.
+One-shot, runs as the `hermes` user. It does a single wide pass: one discovery
+sweep over the range, then a **full comment fetch of every matched thread**.
+
+Run it inside `tmux` / `screen` (or `systemd-run --scope`) so an SSH drop can't
+kill it:
 
 ```bash
-sudo -u hermes /opt/hermes-digger/.venv/bin/python \
-    /opt/hermes-digger/digger.py --backfill 7
+tmux new -s backfill
+sudo -u hermes HERMES_KINDS=daily,moves,weekend,gain,loss,discussion \
+    /opt/hermes-digger/.venv/bin/python /opt/hermes-digger/digger.py --backfill 7
 ```
 
-It leaves the watermarks at "now", so the hourly timer takes over cleanly.
+Timing depends entirely on `HERMES_KINDS`:
+
+* **megathreads only** (`daily,moves,weekend`): ~13 threads over 7 days, **20-40 min**.
+* **+ `gain,loss,discussion`**: hundreds of threads, **1-4 hours**. Most flair
+  posts are short and old, so consider `--backfill 2` or `3` for those and keep
+  `--backfill 7` for the megathreads, or just let it run.
+
+Every thread is checkpointed as it completes (`threads.comments_through`), so a
+Ctrl-C is safe: **re-run the exact same `--backfill N`** to fill what's left
+(already-done threads become a cheap delta). Don't let the hourly timer take over
+after a *partial* backfill -- it only moves forward, so history for threads the
+backfill never reached is lost once they age out (~48 h).
+
+It leaves the watermarks at "now", so once complete the hourly timer continues
+cleanly.
+
+### Is the backfill still working?
+
+From a second SSH session (WAL lets you read while it writes):
+
+```bash
+watch -n15 "sudo -u hermes sqlite3 -readonly /opt/hermes-digger/hermes.db \
+'WITH w AS (SELECT strftime(\"%s\",window_end) e FROM runs ORDER BY id DESC LIMIT 1) \
+ SELECT (SELECT COUNT(*) FROM comments) comments, \
+        (SELECT COUNT(*) FROM threads) threads, \
+        (SELECT SUM(comments_through>=(SELECT e FROM w)) FROM threads) threads_done;'"
+```
+
+`comments` climbing = it's consuming data. `threads_done / threads` ~= progress.
+The `runs` row stays `status=running` with `n_comments_new=0` until the whole
+pass finishes -- that's expected; look at the `comments` count, not the run row.
+`pgrep -af 'digger.py --backfill'` confirms the process is alive.
 
 ## 4. Verify
 
@@ -146,6 +183,10 @@ restic ... forget --keep-daily 14 --keep-weekly 8 --prune
   or set it in a drop-in).
 * **timer not firing** -- `systemctl status hermes-digger.timer`; check the box
   clock (`timedatectl`) is on UTC and correct.
+* **backfill "runs forever"** -- with `gain,loss,discussion` in `HERMES_KINDS`
+  it's hundreds of threads and takes hours (see §3). It's not stuck if the
+  `comments` count keeps climbing. Safe to Ctrl-C and re-run the same
+  `--backfill N`.
 * **disk filling** -- `du -sh /opt/hermes-digger/*`; prune backups
   (`BACKUP_KEEP`), and see the retention work in Phase 5.
 
