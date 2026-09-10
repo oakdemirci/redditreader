@@ -135,24 +135,33 @@ def process_slice(conn, arc: Archive, subreddit: str, kinds: set[str],
                     f"title={(post.get('title') or '')[:60]!r}")
         store.set_meta(conn, "discovery_through", _iso(end))
 
-        # 2. pull each open thread's comments from its own watermark up to `end`
-        for t in store.open_threads(conn):
-            frm = max(store.resume_ts(conn, t["id"]), t["created_utc"] or 0)
-            if frm >= end:
-                continue
+        # 2. one windowed sweep of the whole subreddit's comments in [start, end),
+        #    bucketed to the threads we track. One query covers every open thread
+        #    and avoids the per-thread `link_id` form that Arctic Shift 422s.
+        #    (A thread discovered here with older history gets it via `--backfill`,
+        #     not from a normal hourly slice.)
+        open_threads = {t["id"]: t for t in store.open_threads(conn)}
+        if open_threads:
             try:
-                comments = arc.comments(t["id"], after=frm - 1, before=end)
+                by_thread = arc.comments_in_window(
+                    subreddit, start - 1, end, link_ids=set(open_threads)
+                )
             except ArchiveError as exc:
-                failures.append(f"{t['id']}: {exc}")
-                log(f"thread id={t['id']} status=error err={exc!r}")
-                continue
-            inserted, updated = store.upsert_comments(conn, t["id"], comments)
-            store.set_comments_through(conn, t["id"], end)  # advance last, after the write
-            fetched_threads += 1
-            new_comments += inserted
-            if comments:
-                log(f"thread id={t['id']} kind={t['kind']} "
-                    f"fetched={len(comments)} new={inserted} upd={updated}")
+                failures.append(f"comment sweep: {exc}")
+                log(f"comment sweep {_iso(start)}..{_iso(end)} status=error err={exc!r}")
+                by_thread = {}
+
+            for tid, comments in by_thread.items():
+                kind = open_threads[tid]["kind"] if tid in open_threads else "?"
+                inserted, updated = store.upsert_comments(conn, tid, comments)
+                store.set_comments_through(conn, tid, end)
+                fetched_threads += 1
+                new_comments += inserted
+                log(f"thread id={tid} kind={kind} fetched={len(comments)} "
+                    f"new={inserted} upd={updated}")
+            # threads with nothing new this window still advance their watermark
+            for tid in open_threads.keys() - by_thread.keys():
+                store.set_comments_through(conn, tid, end)
 
         # 3. regex ticker/coin extraction over the comments just added, then
         #    (opt-in, budget-capped) the LLM disambiguation pass

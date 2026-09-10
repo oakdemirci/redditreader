@@ -112,7 +112,17 @@ def ingest_thread(conn, arc: Archive, post: dict, kind: str, *,
 
     store.upsert_thread(conn, kind, post, is_open=is_open)
     after, before = (window or (None, None))
-    comments = arc.comments(tid, md2html=md2html, after=after, before=before, cap=cap)
+    try:
+        comments = arc.comments(tid, md2html=md2html, after=after, before=before, cap=cap)
+    except ArchiveError as exc:
+        # the per-thread link_id form is throttled hard by Arctic Shift; fall back
+        # to the subreddit+time sweep (slower for one thread, but it works).
+        print(f"   link_id fetch failed ({exc}); sweeping the subreddit window instead")
+        sub = post.get("subreddit") or "wallstreetbets"
+        lo = after or (post.get("created_utc") or 0)
+        hi = before or int(datetime.now(timezone.utc).timestamp())
+        comments = arc.comments_in_window(sub, lo - 1, hi, link_ids={tid},
+                                          md2html=md2html).get(bare_id(tid), [])
     inserted, updated = store.upsert_comments(conn, tid, comments)
 
     reported = post.get("num_comments") or 0

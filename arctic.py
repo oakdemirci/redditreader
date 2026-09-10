@@ -223,3 +223,48 @@ class Archive:
             else:
                 cursor = newest - 1
         return list(collected.values())
+
+    def comments_in_window(self, subreddit: str, after: int, before: int, *,
+                           link_ids=None, md2html: bool = False,
+                           on_progress=None) -> dict[str, list[dict]]:
+        """Every comment in ``subreddit`` with ``created_utc`` in [after, before),
+        grouped by bare thread id.
+
+        Uses the subreddit + time-range form of ``comments/search`` -- the
+        per-thread ``link_id`` form is unreliable (Arctic Shift throttles it hard
+        and 422s), whereas this one query covers *all* tracked threads at once.
+        ``link_ids`` (an iterable of thread ids, any form) restricts the result to
+        those threads; comments for other threads are still paged past but dropped.
+        """
+        want = None if link_ids is None else {bare_id(x) for x in link_ids}
+        out: dict[str, list[dict]] = {}
+        seen: set[str] = set()
+        cursor = after
+        total = 0
+        while True:
+            batch = self.get("comments/search", subreddit=subreddit, after=cursor,
+                             before=before, sort="asc", limit=PAGE, md2html=_yn(md2html))
+            if not batch:
+                break
+            added = 0
+            newest = cursor or 0
+            for comment in batch:
+                ts = comment.get("created_utc") or 0
+                newest = max(newest, ts)
+                if comment["id"] in seen:
+                    continue
+                seen.add(comment["id"])
+                added += 1
+                tid = bare_id(comment.get("link_id") or "")
+                if want is not None and tid not in want:
+                    continue
+                out.setdefault(tid, []).append(comment)
+                total += 1
+            if on_progress:
+                on_progress(total)
+            else:
+                self._log(f"{total} in-scope comments, {len(seen)} scanned")
+            if len(batch) < PAGE:
+                break
+            cursor = newest + 1 if added == 0 else newest - 1
+        return out
