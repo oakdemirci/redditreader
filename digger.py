@@ -216,14 +216,17 @@ def run(conn, arc: Archive, subreddit: str, kinds: set[str], *,
     known = tickers.load_known_stock_symbols()
 
     if backfill_days:
-        # one wide slice: a single discovery sweep over the whole range, then each
-        # thread fetched from its own resume point. Leaves watermarks at `target`
-        # so the hourly timer picks up cleanly from here.
+        # day-by-day slices: each is one bounded comment sweep (~1 day of the
+        # subreddit) that commits its own progress, so a Ctrl-C resumes and the
+        # API is never hit with a giant range. Leaves watermarks at `target`.
         start = target - backfill_days * 86400
-        log(f"backfill {_iso(start)}..{_iso(target)} ({backfill_days}d)")
-        process_slice(conn, arc, subreddit, kinds, start, target, log,
-                      known_symbols=known, archive_dir=archive_dir, use_llm=use_llm)
-        return 1
+        slices = [(s, min(s + 86400, target)) for s in range(start, target, 86400)]
+        log(f"backfill {_iso(start)}..{_iso(target)} ({backfill_days}d, "
+            f"{len(slices)} daily slices)")
+        for s, e in slices:
+            process_slice(conn, arc, subreddit, kinds, s, e, log,
+                          known_symbols=known, archive_dir=archive_dir, use_llm=use_llm)
+        return len(slices)
 
     start = since if since is not None else compute_start(conn, now)
 
