@@ -259,7 +259,7 @@ sudo -u hermes -H bash -c 'curl -fsSL https://hermes-agent.nousresearch.com/inst
 sudo -u hermes -H hermes    # opens a session
 # in the session:
 /model                      # pick "Custom endpoint": base https://api.deepseek.com/v1,
-                            # model deepseek-v4-flash, key = your DEEPSEEK_API_KEY
+                            # model deepseek-chat, key = your DEEPSEEK_API_KEY
 ```
 
 (Same key as `.env`'s `DEEPSEEK_API_KEY`. The digger and Hermes can share it.)

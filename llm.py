@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 import requests
 
 BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
-MODEL = os.environ.get("HERMES_LLM_MODEL", "deepseek-v4-flash")
+MODEL = os.environ.get("HERMES_LLM_MODEL", "deepseek-chat")  # -> deepseek-flash server-side
 DAILY_BUDGET_USD = float(os.environ.get("HERMES_LLM_DAILY_USD", "1.00"))
 
 # USD per 1M tokens. DeepSeek V4-Flash, off-peak cache-miss (checked 2026-09);
